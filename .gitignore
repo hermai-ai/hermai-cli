@@ -1,0 +1,27 @@
+# Build artifacts
+/hermai
+/hermai.exe
+*.test
+*.out
+coverage.out
+
+# GoReleaser
+dist/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local config / secrets — never commit
+.env
+.env.*
+*.key
+.firebase-key.json
+
+# Local agent skills
+.agents/

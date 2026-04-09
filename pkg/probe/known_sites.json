@@ -1,0 +1,134 @@
+[
+  {
+    "name": "x_tweet",
+    "host_pattern": "^(x\\.com|twitter\\.com)$",
+    "path_pattern": "^/(?P<user>[^/]+)/status/(?P<id>\\d+)",
+    "api_url_template": "https://cdn.syndication.twimg.com/tweet-result?id={id}&token=x",
+    "variables": [
+      {"name": "id", "source": "path", "pattern": "\\d+"}
+    ]
+  },
+  {
+    "name": "hn_item",
+    "host_pattern": "^news\\.ycombinator\\.com$",
+    "path_pattern": "^/item",
+    "api_url_template": "https://hacker-news.firebaseio.com/v0/item/{id}.json",
+    "variables": [
+      {"name": "id", "source": "query", "pattern": "id"}
+    ]
+  },
+  {
+    "name": "github_tree",
+    "host_pattern": "^github\\.com$",
+    "path_pattern": "^/[^/]+/[^/]+/tree/[^/]+/.+$",
+    "api_url_template": "https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}",
+    "variables": [
+      {"name": "owner", "source": "path", "pattern": "0"},
+      {"name": "repo", "source": "path", "pattern": "1"},
+      {"name": "branch", "source": "path", "pattern": "3"},
+      {"name": "path", "source": "path_rest", "pattern": "4"}
+    ]
+  },
+  {
+    "name": "github_blob",
+    "host_pattern": "^github\\.com$",
+    "path_pattern": "^/[^/]+/[^/]+/blob/[^/]+/.+$",
+    "api_url_template": "https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}",
+    "variables": [
+      {"name": "owner", "source": "path", "pattern": "0"},
+      {"name": "repo", "source": "path", "pattern": "1"},
+      {"name": "branch", "source": "path", "pattern": "3"},
+      {"name": "path", "source": "path_rest", "pattern": "4"}
+    ]
+  },
+  {
+    "name": "github_repo",
+    "host_pattern": "^github\\.com$",
+    "path_pattern": "^/(?P<owner>[^/]+)/(?P<repo>[^/]+)/?$",
+    "api_url_template": "https://api.github.com/repos/{owner}/{repo}",
+    "variables": [
+      {"name": "owner", "source": "path", "pattern": "0"},
+      {"name": "repo", "source": "path", "pattern": "1"}
+    ]
+  },
+  {
+    "name": "youtube_video",
+    "host_pattern": "^(www\\.)?youtube\\.com$",
+    "path_pattern": "^/watch",
+    "api_url_template": "https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={v}&format=json",
+    "variables": [
+      {"name": "v", "source": "query", "pattern": "v"}
+    ]
+  },
+  {
+    "name": "youtube_short",
+    "host_pattern": "^youtu\\.be$",
+    "path_pattern": "^/(?P<id>[^/]+)",
+    "api_url_template": "https://www.youtube.com/oembed?url=https://youtu.be/{id}&format=json",
+    "variables": [
+      {"name": "id", "source": "path", "pattern": "[a-zA-Z0-9_-]+"}
+    ]
+  },
+  {
+    "name": "arkansas_court_case",
+    "host_pattern": "^caseinfo\\.arcourts\\.gov$",
+    "path_pattern": "^/opad/case/[^/]+$",
+    "api_url_template": "https://caseinfo.arcourts.gov/opad/api/cases/{caseId}",
+    "variables": [
+      {"name": "caseId", "source": "path", "pattern": "2"}
+    ]
+  },
+  {
+    "name": "wikipedia_page",
+    "host_pattern": "^(?P<lang>[a-z]+)\\.wikipedia\\.org$",
+    "path_pattern": "^/wiki/(?P<title>[^#?]+)",
+    "api_url_template": "https://{lang}.wikipedia.org/api/rest_v1/page/summary/{title}",
+    "variables": [
+      {"name": "title", "source": "path", "pattern": "[^#?]+"},
+      {"name": "lang", "source": "fixed", "pattern": "en"}
+    ]
+  },
+  {
+    "name": "npm_package",
+    "host_pattern": "^(www\\.)?npmjs\\.com$",
+    "path_pattern": "^/package/(?P<package>[^/]+)/?$",
+    "api_url_template": "https://registry.npmjs.org/{package}",
+    "variables": [
+      {"name": "package", "source": "path", "pattern": "1"}
+    ]
+  },
+  {
+    "name": "npm_scoped_package",
+    "host_pattern": "^(www\\.)?npmjs\\.com$",
+    "path_pattern": "^/package/(@[^/]+/[^/]+)/?$",
+    "api_url_template": "https://registry.npmjs.org/{package}",
+    "variables": [
+      {"name": "package", "source": "path_rest", "pattern": "1"}
+    ]
+  },
+  {
+    "name": "pypi_package",
+    "host_pattern": "^pypi\\.org$",
+    "path_pattern": "^/project/(?P<package>[^/]+)",
+    "api_url_template": "https://pypi.org/pypi/{package}/json",
+    "variables": [
+      {"name": "package", "source": "path", "pattern": "1"}
+    ]
+  },
+  {
+    "name": "yahoo_finance_quote",
+    "host_pattern": "^finance\\.yahoo\\.com$",
+    "path_pattern": "^/quote/(?P<symbol>[^/]+)",
+    "api_url_template": "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1d&interval=1m",
+    "variables": [
+      {"name": "symbol", "source": "path", "pattern": "1"}
+    ]
+  },
+  {
+    "name": "hn_front_page",
+    "host_pattern": "^news\\.ycombinator\\.com$",
+    "path_pattern": "^/?$",
+    "api_url_template": "https://hacker-news.firebaseio.com/v0/topstories.json",
+    "variables": []
+  }
+]

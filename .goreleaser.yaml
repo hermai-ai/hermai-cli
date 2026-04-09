@@ -1,0 +1,102 @@
+# GoReleaser config for hermai-cli
+# https://goreleaser.com
+version: 2
+
+project_name: hermai-cli
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: hermai
+    binary: hermai
+    main: ./cmd/hermai
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    name_template: "hermai_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "Merge pull request"
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Refactors
+      regexp: '^.*?refactor(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: Others
+      order: 999
+
+release:
+  github:
+    owner: hermai-ai
+    name: hermai-cli
+  name_template: "v{{.Version}}"
+  draft: false
+  prerelease: auto
+  header: |
+    ## hermai-cli {{ .Tag }}
+
+    The open-source engine that turns any website into structured JSON for AI agents.
+  footer: |
+    ---
+    **Install**
+
+    ```bash
+    # Linux / macOS
+    curl -L https://github.com/hermai-ai/hermai-cli/releases/download/{{ .Tag }}/hermai_{{ .Version }}_$(uname -s | tr A-Z a-z)_$(uname -m | sed 's/x86_64/amd64/').tar.gz | tar xz
+    ./hermai --version
+    ```
+
+    Or via `go install`:
+
+    ```bash
+    go install github.com/hermai-ai/hermai-cli/cmd/hermai@{{ .Tag }}
+    ```
+
+    See [docs.hermai.ai](https://docs.hermai.ai) for usage.

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/hermai-ai/hermai-cli/internal/config"
+	"github.com/hermai-ai/hermai-cli/pkg/config"
 	"github.com/hermai-ai/hermai-cli/pkg/cache"
 	"github.com/spf13/cobra"
 )

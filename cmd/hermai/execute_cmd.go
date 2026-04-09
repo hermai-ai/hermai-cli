@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/hermai-ai/hermai-cli/internal/config"
+	"github.com/hermai-ai/hermai-cli/pkg/config"
 	"github.com/hermai-ai/hermai-cli/pkg/actions"
 	"github.com/hermai-ai/hermai-cli/pkg/analyzer"
 	"github.com/hermai-ai/hermai-cli/pkg/browser"

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hermai-ai/hermai-cli/internal/config"
+	"github.com/hermai-ai/hermai-cli/pkg/config"
 	"github.com/spf13/cobra"
 )
 

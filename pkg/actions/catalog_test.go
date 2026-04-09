@@ -85,6 +85,90 @@ func TestBuildCatalog_HybridActions(t *testing.T) {
 	}
 }
 
+// TestBuildCatalog_IncludesSchemaBakedActions is the regression test for the
+// silently-dropped-actions bug: schemas can carry hand-built Actions (e.g.
+// site-specific probes like Shopify expose POST /cart/add.js as an Action,
+// not an Endpoint) and BuildCatalog used to ignore them entirely because
+// compileAPIActions only iterated s.Endpoints. The fix is a single
+// `actions = append(actions, s.Actions...)` line in compileAPIActions; this
+// test pins it down so it can't silently regress.
+func TestBuildCatalog_IncludesSchemaBakedActions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<html><body>shopify-style page, no forms</body></html>`))
+	}))
+	defer server.Close()
+
+	catalog, err := BuildCatalog(context.Background(), &stubCache{
+		api: &schema.Schema{
+			Domain:     "example-shop.com",
+			Coverage:   schema.SchemaCoverageComplete,
+			CreatedAt:  time.Now(),
+			SchemaType: schema.SchemaTypeAPI,
+			Endpoints: []schema.Endpoint{
+				{
+					Name:        "products",
+					Description: "Public product catalog",
+					Method:      "GET",
+					URLTemplate: server.URL + "/products.json",
+				},
+			},
+			// Hand-built actions that don't fit the Endpoints shape — these
+			// must surface in the catalog. Mirrors the Shopify probe pattern.
+			Actions: []schema.Action{
+				{
+					Name:        "add_to_cart",
+					Description: "Add a product variant to the cart",
+					Kind:        schema.ActionKindAPICall,
+					Transport:   schema.ActionTransportAPICall,
+					Method:      "POST",
+					URLTemplate: server.URL + "/cart/add.js",
+					Headers:     map[string]string{"Content-Type": "application/json"},
+					Confidence:  0.98,
+					Source:      "shopify_ajax_api",
+				},
+				{
+					Name:        "get_cart",
+					Description: "Get current cart contents",
+					Kind:        schema.ActionKindAPICall,
+					Transport:   schema.ActionTransportAPICall,
+					Method:      "GET",
+					URLTemplate: server.URL + "/cart.js",
+					Confidence:  0.98,
+					Source:      "shopify_ajax_api",
+				},
+			},
+		},
+	}, server.URL, DiscoverOptions{})
+	if err != nil {
+		t.Fatalf("BuildCatalog error: %v", err)
+	}
+
+	names := make(map[string]bool)
+	for _, action := range catalog.Actions {
+		names[action.Name] = true
+	}
+
+	// The endpoint-derived action must still be there.
+	if !names["products"] {
+		t.Errorf("expected endpoint-derived action %q in catalog, got: %v", "products", actionNames(catalog.Actions))
+	}
+	// The hand-built actions must also be there — this is the regression case.
+	for _, want := range []string{"add_to_cart", "get_cart"} {
+		if !names[want] {
+			t.Errorf("expected schema-baked action %q in catalog, got: %v", want, actionNames(catalog.Actions))
+		}
+	}
+}
+
+func actionNames(actions []schema.Action) []string {
+	out := make([]string, 0, len(actions))
+	for _, a := range actions {
+		out = append(out, a.Name)
+	}
+	return out
+}
+
 func TestExecuteAction_SearchGET(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/search" {

@@ -86,7 +86,7 @@ func BuildCatalog(ctx context.Context, c cache.Service, targetURL string, opts D
 }
 
 func compileAPIActions(s *schema.Schema) []schema.Action {
-	actions := make([]schema.Action, 0, len(s.Endpoints))
+	actions := make([]schema.Action, 0, len(s.Endpoints)+len(s.Actions))
 	for _, ep := range s.Endpoints {
 		action := schema.Action{
 			Name:        normalizedActionName(ep.Name, "api_call"),
@@ -129,6 +129,14 @@ func compileAPIActions(s *schema.Schema) []schema.Action {
 		}
 		actions = append(actions, action)
 	}
+
+	// Schemas can also carry hand-built actions directly (e.g. site-specific
+	// probes like Shopify expose write actions like add_to_cart that don't
+	// fit the read-shaped Endpoints model). Without this append, those
+	// actions get silently dropped — see TestCompileAPIActionsIncludesActions
+	// for the regression case.
+	actions = append(actions, s.Actions...)
+
 	return actions
 }
 

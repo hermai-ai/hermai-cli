@@ -23,10 +23,10 @@ type Config struct {
 }
 
 // PlatformConfig holds settings for talking to the hermai hosted platform
-// (the registry API at api.hermai.dev). The CLI needs an API key to push
+// (the registry API at api.hermai.ai). The CLI needs an API key to push
 // schemas and to fetch from the registry over the public catalog endpoints.
 type PlatformConfig struct {
-	URL string // base URL of the hosted platform, e.g. https://api.hermai.dev
+	URL string // base URL of the hosted platform, e.g. https://api.hermai.ai
 	Key string // API key issued by the platform (hm_sk_...)
 }
 
@@ -97,7 +97,7 @@ func loadFromFile(path string) Config {
 			WaitAfterLoad: 1500 * time.Millisecond,
 		},
 		Platform: PlatformConfig{
-			URL: resolve("HERMAI_PLATFORM_URL", file.PlatformURL, "https://api.hermai.dev"),
+			URL: resolve("HERMAI_PLATFORM_URL", file.PlatformURL, "https://api.hermai.ai"),
 			Key: resolve("HERMAI_PLATFORM_KEY", file.PlatformKey, ""),
 		},
 		Proxy:   resolve("HERMAI_PROXY", file.Proxy, ""),

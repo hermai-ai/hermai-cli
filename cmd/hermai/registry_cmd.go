@@ -112,7 +112,7 @@ func newRegistryLoginCmd() *cobra.Command {
 		Short: "Save a platform API key to the hermai config",
 		Long: `login walks you through pasting an API key from the dashboard.
 
-Sign in at https://hermai.dev with your GitHub account, copy the API key from
+Sign in at https://hermai.ai with your GitHub account, copy the API key from
 the dashboard, and paste it here. The key is stored in ~/.hermai/config.yaml
 with 0600 permissions.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -304,7 +304,7 @@ func newRegistryListCmd() *cobra.Command {
 }
 
 func dashboardURL(apiURL string) string {
-	// Map api.* → app.* (or hermai.dev) for the dashboard. Best-effort heuristic.
+	// Map api.* → the main site for the dashboard. Best-effort heuristic.
 	if strings.HasPrefix(apiURL, "https://api.") {
 		return "https://" + strings.TrimPrefix(apiURL, "https://api.") + "/dashboard"
 	}

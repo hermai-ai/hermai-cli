@@ -44,10 +44,16 @@ by observing browser network traffic and producing structured JSON schemas.`,
 	root.AddCommand(newFetchCmd())
 	root.AddCommand(newCacheCmd())
 	root.AddCommand(newSchemaCmd())
+	root.AddCommand(newDiscoverCmd())
 	root.AddCommand(newCatalogCmd())
-	root.AddCommand(newExecuteCmd())
 	root.AddCommand(newDoctorCmd())
 	root.AddCommand(newRegistryCmd())
+
+	// Phase 2 commands — gated behind HERMAI_PHASE2=1 so the code stays
+	// intact but doesn't clutter the Phase 1 CLI surface.
+	if os.Getenv("HERMAI_PHASE2") == "1" {
+		root.AddCommand(newExecuteCmd())
+	}
 
 	return root
 }

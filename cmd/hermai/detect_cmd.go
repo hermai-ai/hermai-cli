@@ -95,7 +95,7 @@ Examples:
 			}
 			opts := buildProbeOpts(proxyURL, stealth, insecure, dur)
 
-			ctx, cancel := signalContext()
+			ctx, cancel := signalContext(dur)
 			defer cancel()
 
 			client := probe.NewClient(opts)
@@ -143,10 +143,8 @@ Examples:
 				output["platform"] = platforms
 			}
 
-			// Blocked if explicit error status OR anti-bot challenge served on 200
 			statusBlocked := resp.StatusCode == 403 || resp.StatusCode == 429 || resp.StatusCode == 503
-			challengeOn200 := resp.StatusCode == 200 && len(antibotFound) > 0 && len(bodyBytes) < 50*1024
-			if statusBlocked || challengeOn200 {
+			if statusBlocked || len(antibotFound) > 0 {
 				output["blocked"] = true
 			}
 

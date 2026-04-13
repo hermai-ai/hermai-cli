@@ -47,7 +47,7 @@ Examples:
 			}
 			opts := buildProbeOpts(proxyURL, stealth, insecure, dur)
 
-			ctx, cancel := signalContext()
+			ctx, cancel := signalContext(dur)
 			defer cancel()
 
 			client := probe.NewClient(opts)

@@ -1,15 +1,14 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
+	"sort"
 	"strings"
-	"syscall"
+	"sync"
 	"time"
 
 	"github.com/hermai-ai/hermai-cli/pkg/probe"
@@ -39,6 +38,9 @@ var defaultWellKnownPaths = []wellKnownPath{
 	{"/api/v1", "api", "API v1 root"},
 	{"/.json", "json", "JSON representation"},
 }
+
+// GraphQL endpoints often reject GET with 400/405 but still exist.
+var graphqlTypes = map[string]bool{"graphql": true}
 
 type wellKnownResult struct {
 	Path        string `json:"path"`
@@ -84,23 +86,13 @@ Examples:
 			}
 			baseURL := parsed.Scheme + "://" + parsed.Host
 
-			dur := 15 * time.Second
-			if timeout != "" {
-				d, err := time.ParseDuration(timeout)
-				if err != nil {
-					return fmt.Errorf("invalid --timeout: %w", err)
-				}
-				dur = d
+			dur, err := parseTimeout(timeout, 15*time.Second)
+			if err != nil {
+				return err
 			}
+			opts := buildProbeOpts(proxyURL, stealth, insecure, dur)
 
-			opts := probe.Options{
-				ProxyURL: proxyURL,
-				Stealth:  stealth,
-				Insecure: insecure,
-				Timeout:  dur,
-			}
-
-			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			ctx, cancel := signalContext()
 			defer cancel()
 
 			client := probe.NewClient(opts)
@@ -109,12 +101,19 @@ Examples:
 				idx    int
 				result wellKnownResult
 			}
-			resultCh := make(chan indexedResult, len(defaultWellKnownPaths))
-			sem := make(chan struct{}, 5)
+
+			var (
+				mu      sync.Mutex
+				results []indexedResult
+				wg      sync.WaitGroup
+				sem     = make(chan struct{}, 5)
+			)
 
 			for i, wk := range defaultWellKnownPaths {
-				sem <- struct{}{}
+				wg.Add(1)
 				go func(idx int, wk wellKnownPath) {
+					defer wg.Done()
+					sem <- struct{}{}
 					defer func() { <-sem }()
 
 					fullURL := baseURL + wk.Path
@@ -131,35 +130,44 @@ Examples:
 					io.Copy(io.Discard, resp.Body)
 					resp.Body.Close()
 
-					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-						ct := resp.Header.Get("Content-Type")
-						cl := int(resp.ContentLength)
-						if cl < 0 {
-							cl = 0
-						}
-						resultCh <- indexedResult{idx, wellKnownResult{
-							Path:        wk.Path,
-							URL:         fullURL,
-							Type:        wk.Type,
-							Description: wk.Description,
-							Status:      resp.StatusCode,
-							ContentType: ct,
-							Size:        cl,
-						}}
+					// 2xx = exists. For GraphQL, 400/405 also indicate the
+					// endpoint exists (rejects GET but responds to POST).
+					found := resp.StatusCode >= 200 && resp.StatusCode < 300
+					if !found && graphqlTypes[wk.Type] && (resp.StatusCode == 400 || resp.StatusCode == 405) {
+						found = true
 					}
+					if !found {
+						return
+					}
+
+					ct := resp.Header.Get("Content-Type")
+					cl := int(resp.ContentLength)
+					if cl < 0 {
+						cl = 0
+					}
+
+					mu.Lock()
+					results = append(results, indexedResult{idx, wellKnownResult{
+						Path:        wk.Path,
+						URL:         fullURL,
+						Type:        wk.Type,
+						Description: wk.Description,
+						Status:      resp.StatusCode,
+						ContentType: ct,
+						Size:        cl,
+					}})
+					mu.Unlock()
 				}(i, wk)
 			}
 
-			// Wait for all goroutines to finish
-			for range cap(sem) {
-				sem <- struct{}{}
-			}
-			close(resultCh)
+			wg.Wait()
 
-			var found []wellKnownResult
-			for r := range resultCh {
-				_ = r.idx
-				found = append(found, r.result)
+			sort.Slice(results, func(i, j int) bool {
+				return results[i].idx < results[j].idx
+			})
+			found := make([]wellKnownResult, len(results))
+			for i, r := range results {
+				found[i] = r.result
 			}
 
 			output := map[string]any{

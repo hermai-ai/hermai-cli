@@ -1,14 +1,11 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/hermai-ai/hermai-cli/pkg/probe"
@@ -92,23 +89,13 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			targetURL := args[0]
 
-			dur := 10 * time.Second
-			if timeout != "" {
-				d, err := time.ParseDuration(timeout)
-				if err != nil {
-					return fmt.Errorf("invalid --timeout: %w", err)
-				}
-				dur = d
+			dur, err := parseTimeout(timeout, 10*time.Second)
+			if err != nil {
+				return err
 			}
+			opts := buildProbeOpts(proxyURL, stealth, insecure, dur)
 
-			opts := probe.Options{
-				ProxyURL: proxyURL,
-				Stealth:  stealth,
-				Insecure: insecure,
-				Timeout:  dur,
-			}
-
-			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			ctx, cancel := signalContext()
 			defer cancel()
 
 			client := probe.NewClient(opts)
@@ -156,8 +143,10 @@ Examples:
 				output["platform"] = platforms
 			}
 
-			blocked := resp.StatusCode == 403 || resp.StatusCode == 429 || resp.StatusCode == 503
-			if blocked {
+			// Blocked if explicit error status OR anti-bot challenge served on 200
+			statusBlocked := resp.StatusCode == 403 || resp.StatusCode == 429 || resp.StatusCode == 503
+			challengeOn200 := resp.StatusCode == 200 && len(antibotFound) > 0 && len(bodyBytes) < 50*1024
+			if statusBlocked || challengeOn200 {
 				output["blocked"] = true
 			}
 

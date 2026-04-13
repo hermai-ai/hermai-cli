@@ -6,8 +6,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/hermai-ai/hermai-cli/pkg/probe"
@@ -46,24 +44,13 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			targetURL := args[0]
 
-			const defaultProbeTimeout = 10 * time.Second
-			dur := defaultProbeTimeout
-			if timeout != "" {
-				d, err := time.ParseDuration(timeout)
-				if err != nil {
-					return fmt.Errorf("invalid --timeout: %w", err)
-				}
-				dur = d
+			dur, err := parseTimeout(timeout, 10*time.Second)
+			if err != nil {
+				return err
 			}
+			opts := buildProbeOpts(proxyURL, stealth, insecure, dur)
 
-			opts := probe.Options{
-				ProxyURL: proxyURL,
-				Stealth:  stealth,
-				Insecure: insecure,
-				Timeout:  dur,
-			}
-
-			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			ctx, cancel := signalContext()
 			defer cancel()
 
 			if body {

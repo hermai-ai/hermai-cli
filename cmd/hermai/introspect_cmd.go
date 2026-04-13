@@ -2,15 +2,12 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/hermai-ai/hermai-cli/pkg/probe"
@@ -44,30 +41,20 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			targetURL := args[0]
 
-			dur := 10 * time.Second
-			if timeout != "" {
-				d, err := time.ParseDuration(timeout)
-				if err != nil {
-					return fmt.Errorf("invalid --timeout: %w", err)
-				}
-				dur = d
+			dur, err := parseTimeout(timeout, 10*time.Second)
+			if err != nil {
+				return err
 			}
+			opts := buildProbeOpts(proxyURL, stealth, insecure, dur)
 
-			opts := probe.Options{
-				ProxyURL: proxyURL,
-				Stealth:  stealth,
-				Insecure: insecure,
-				Timeout:  dur,
-			}
-
-			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			ctx, cancel := signalContext()
 			defer cancel()
 
 			client := probe.NewClient(opts)
 
 			query := introspectionQuery
 			if full {
-				query = `{"query":"{ __schema { queryType { name fields { name description args { name type { name kind ofType { name kind ofType { name } } } defaultValue } type { name kind ofType { name kind ofType { name } } } } } mutationType { name fields { name description args { name type { name kind ofType { name kind } } } } } } }"}`
+				query = `{"query":"{ __schema { queryType { name fields { name description args { name type { name kind ofType { name kind ofType { name } } } defaultValue } type { name kind ofType { name kind ofType { name } } } } } mutationType { name fields { name description args { name type { name kind ofType { name kind } } } } } types { name kind description fields { name description args { name type { name kind ofType { name kind } } defaultValue } type { name kind ofType { name kind ofType { name } } } } } } }"}`
 			}
 
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewBufferString(query))

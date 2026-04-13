@@ -48,7 +48,6 @@ by observing browser network traffic and producing structured JSON schemas.`,
 	root.AddCommand(newCatalogCmd())
 	root.AddCommand(newDoctorCmd())
 	root.AddCommand(newRegistryCmd())
-	root.AddCommand(newSessionCmd())
 	root.AddCommand(newProbeCmd())
 	root.AddCommand(newExtractCmd())
 	root.AddCommand(newWellKnownCmd())

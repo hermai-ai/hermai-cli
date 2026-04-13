@@ -10,10 +10,7 @@ import (
 	"github.com/hermai-ai/hermai-cli/internal/httpclient"
 )
 
-const (
-	maxHTMLSize = 5 * 1024 * 1024 // 5MB
-	fetchUA     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-)
+const maxHTMLSize = 5 * 1024 * 1024 // 5MB
 
 // FetchHTML performs an HTTP GET and returns the response body as a string.
 // It uses a browser-like User-Agent to avoid bot-detection blocks.
@@ -36,7 +33,7 @@ func FetchHTMLWithClient(ctx context.Context, client httpclient.Doer, targetURL 
 		return "", fmt.Errorf("htmlext: failed to create request: %w", err)
 	}
 
-	req.Header.Set("User-Agent", fetchUA)
+	req.Header.Set("User-Agent", httpclient.BrowserUserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
 

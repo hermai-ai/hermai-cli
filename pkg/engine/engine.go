@@ -989,6 +989,15 @@ func extractBestHARResponse(har *browser.HARLog, targetURL string) any {
 // Requires structural signals AND sufficient body text.
 // Structural signals: <h1>, <article>, JSON-LD, or 20+ links (listing pages).
 func contentIsUseful(page htmlext.PageContent) bool {
+	// Embedded script patterns (ytInitialData, SIGI_STATE, etc.) are rich SSR data —
+	// no need to launch a browser when we already have the full page state.
+	// Require at least 3 keys to filter out stub states like {"loading": true}.
+	for _, v := range page.EmbeddedScripts {
+		if m, ok := v.(map[string]any); ok && len(m) >= 3 {
+			return true
+		}
+	}
+
 	hasH1 := false
 	for _, h := range page.Headings {
 		if h.Level == 1 {

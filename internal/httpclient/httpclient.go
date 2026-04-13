@@ -25,6 +25,10 @@ type Options struct {
 // Default timeout applied when Options.Timeout is zero.
 const DefaultTimeout = 30 * time.Second
 
+// BrowserUserAgent is the User-Agent string used across the codebase for
+// requests to target websites. Centralised here to prevent version drift.
+const BrowserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
 // New creates a plain *http.Client (no TLS fingerprinting).
 // Use for internal API calls (LLM, cache) where fingerprinting is unnecessary.
 func New(opts Options) *http.Client {

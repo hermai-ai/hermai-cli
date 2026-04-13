@@ -9,7 +9,6 @@ import (
 	"github.com/andybalholm/cascadia"
 	"github.com/hermai-ai/hermai-cli/pkg/schema"
 	"golang.org/x/net/html"
-	"golang.org/x/net/html/atom"
 )
 
 const maxStructuredBodyText = 2000
@@ -18,15 +17,9 @@ const maxStructuredBodyText = 2000
 // It combines deterministic parsing (meta, OG, JSON-LD) with main content
 // extraction, preferring JSON-LD as the richest structured data source.
 func ExtractStructured(rawHTML string, baseURL string) map[string]any {
-	doc, err := html.Parse(strings.NewReader(rawHTML))
-	if err != nil {
-		return map[string]any{}
-	}
-
 	page := Extract(rawHTML, baseURL)
 	result := make(map[string]any)
 
-	// Always include title and description
 	if page.Title != "" {
 		result["title"] = page.Title
 	}
@@ -34,8 +27,7 @@ func ExtractStructured(rawHTML string, baseURL string) map[string]any {
 		result["description"] = page.Description
 	}
 
-	// Infer page type from OG type or structure
-	result["type"] = inferPageType(page, doc)
+	result["type"] = inferPageType(page)
 
 	// __NEXT_DATA__ from Next.js SSR pages contains the richest structured
 	// data — full page props, search results, metadata not in the DOM.
@@ -49,6 +41,13 @@ func ExtractStructured(rawHTML string, baseURL string) map[string]any {
 			surfacePagination(result, baseURL)
 			return result
 		}
+	}
+
+	// Embedded script patterns (ytInitialData, SIGI_STATE, __APOLLO_STATE__, etc.)
+	// are SSR state blobs equivalent in richness to __NEXT_DATA__. When found,
+	// include them directly — they contain the full page data.
+	if len(page.EmbeddedScripts) > 0 {
+		result["embedded_scripts"] = page.EmbeddedScripts
 	}
 
 	// JSON-LD is the next best structured data source. If present, merge it
@@ -69,18 +68,7 @@ func ExtractStructured(rawHTML string, baseURL string) map[string]any {
 		result["url"] = page.Canonical
 	}
 
-	// Always include compact body text from rendered DOM — ensures
-	// JS-rendered content (e.g. SPA search results) is captured even
-	// when JSON-LD only contains generic page metadata.
-	mainNode := findMainContent(doc)
-	if mainNode != nil {
-		var b strings.Builder
-		collectBodyText(mainNode, &b)
-		bodyText := cleanBodyText(b.String(), maxStructuredBodyText)
-		if bodyText != "" {
-			result["body_text"] = bodyText
-		}
-	} else if page.BodyText != "" {
+	if page.BodyText != "" {
 		bodyText := cleanBodyText(page.BodyText, maxStructuredBodyText)
 		if bodyText != "" {
 			result["body_text"] = bodyText
@@ -371,9 +359,7 @@ func stripNonNumeric(s string) string {
 	return b.String()
 }
 
-// inferPageType determines the page type from OG metadata and DOM structure.
-func inferPageType(page PageContent, doc *html.Node) string {
-	// Check OG type first
+func inferPageType(page PageContent) string {
 	if ogType, ok := page.OpenGraph["type"]; ok {
 		switch ogType {
 		case "article":
@@ -387,12 +373,10 @@ func inferPageType(page PageContent, doc *html.Node) string {
 		}
 	}
 
-	// Check for article elements
-	if findByTag(doc, atom.Article) != nil {
+	if page.HasArticle {
 		return "article"
 	}
 
-	// Check JSON-LD for @type
 	for _, ld := range page.JSONLD {
 		if m, ok := ld.(map[string]any); ok {
 			if t, ok := m["@type"].(string); ok {

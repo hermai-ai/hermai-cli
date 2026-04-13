@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -318,7 +319,8 @@ func humanizeError(err error) error {
 	case errors.Is(err, context.Canceled):
 		return fmt.Errorf("operation cancelled")
 	case errors.Is(err, browser.ErrAuthWall):
-		return fmt.Errorf("this page requires authentication — use --cookie name=value to provide session cookies")
+		return fmt.Errorf("this page requires authentication — use --cookie name=value to provide session cookies, " +
+			"or if the site has a registered schema run: hermai session bootstrap <site>")
 	case errors.Is(err, engine.ErrAnalysisFailed):
 		return fmt.Errorf("could not identify API endpoints — the site may not have a public JSON API")
 	case errors.Is(err, engine.ErrNoEndpoints):
@@ -326,6 +328,41 @@ func humanizeError(err error) error {
 	case errors.Is(err, fetcher.ErrSchemaBroken):
 		return fmt.Errorf("cached API schema no longer works — try 'hermai cache clear' and retry")
 	default:
+		// Anti-bot gates often surface as opaque 403s or timeouts without a
+		// typed error. When the message looks like one of the common gates,
+		// point the user at the session bootstrap flow — many of those sites
+		// have a registered schema with bootstrap instructions.
+		msg := err.Error()
+		if looksLikeAntiBot(msg) {
+			return fmt.Errorf("%w\n\n"+
+				"this looks like an anti-bot gate (Cloudflare / PerimeterX / DataDome / TikTok signing).\n"+
+				"if the site has a registered schema, run: hermai session bootstrap <site>\n"+
+				"then retry the fetch. See: hermai session --help", err)
+		}
 		return fmt.Errorf("fetch failed: %w", err)
 	}
+}
+
+// looksLikeAntiBot is a shallow heuristic on error text that matches the
+// common symptoms of an anti-bot gate. Used only for the CLI's user-facing
+// hint — it never drives logic that changes what hermai fetches.
+func looksLikeAntiBot(msg string) bool {
+	m := strings.ToLower(msg)
+	for _, s := range []string{
+		"http 403",
+		"403 forbidden",
+		"status 403",
+		"perimeterx",
+		"datadome",
+		"cloudflare",
+		"captcha",
+		"access denied",
+		"x-bogus",
+		"bot detect",
+	} {
+		if strings.Contains(m, s) {
+			return true
+		}
+	}
+	return false
 }

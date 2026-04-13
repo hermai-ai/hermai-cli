@@ -24,14 +24,13 @@ const (
 	maxBodySize       = 2 * 1024 * 1024 // 2MB
 	minKeyCount       = 2
 
-	// Browser-like UA avoids bot detection on sites that check User-Agent.
-	browserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	browserUserAgent = httpclient.BrowserUserAgent
 )
 
-// setBrowserHeaders sets headers that match a real Chrome browser navigation.
+// SetBrowserHeaders sets headers that match a real Chrome browser navigation.
 // Cloudflare and similar WAFs check Sec-Fetch-* headers to distinguish
 // real browsers from HTTP libraries.
-func setBrowserHeaders(req *http.Request) {
+func SetBrowserHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", browserUserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
@@ -84,7 +83,7 @@ func Probe(ctx context.Context, targetURL string, opts Options) (*Result, error)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	client := buildClient(opts)
+	client := NewClient(opts)
 	strategies := buildStrategies()
 
 	outcome := runConcurrent(ctx, client, targetURL, strategies)
@@ -210,11 +209,17 @@ func runConcurrent(ctx context.Context, client httpclient.Doer, targetURL string
 	return outcome
 }
 
-func buildClient(opts Options) httpclient.Doer {
+// NewClient builds an HTTP client from probe options, using stealth TLS
+// fingerprinting when requested.
+func NewClient(opts Options) httpclient.Doer {
+	timeout := opts.Timeout
+	if timeout == 0 {
+		timeout = perRequestTimeout
+	}
 	clientOpts := httpclient.Options{
 		ProxyURL: opts.ProxyURL,
 		Insecure: opts.Insecure,
-		Timeout:  perRequestTimeout,
+		Timeout:  timeout,
 	}
 	if opts.Stealth {
 		return httpclient.NewStealthOrFallback(clientOpts)
@@ -277,7 +282,7 @@ func fetchHTMLBody(ctx context.Context, client httpclient.Doer, targetURL string
 		return "", err
 	}
 
-	setBrowserHeaders(req)
+	SetBrowserHeaders(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -290,19 +295,20 @@ func fetchHTMLBody(ctx context.Context, client httpclient.Doer, targetURL string
 		return "", err
 	}
 
+	body := string(bodyBytes)
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if isBlockedResponse(resp.StatusCode, string(bodyBytes)) {
+		if isBlockedResponse(resp.StatusCode, body) {
 			return "", errAntiBot
 		}
 		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	// Check 200 responses for challenge pages
-	if isBlockedResponse(resp.StatusCode, string(bodyBytes)) {
+	if isBlockedResponse(resp.StatusCode, body) {
 		return "", errAntiBot
 	}
 
-	return string(bodyBytes), nil
+	return body, nil
 }
 
 // doJSONRequest performs a GET request and validates the response is

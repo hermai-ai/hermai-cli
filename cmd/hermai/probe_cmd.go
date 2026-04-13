@@ -134,7 +134,7 @@ func buildProbeOutput(targetURL string, result *probe.Result) map[string]any {
 	}
 	if result.HTMLBody != "" {
 		output["has_html"] = true
-		output["html_size"] = len(result.HTMLBody)
+		output["html_size_bytes"] = len(result.HTMLBody)
 	}
 
 	if len(result.Candidates) > 0 {

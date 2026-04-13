@@ -313,11 +313,11 @@ func (e *extractor) enterElement(n *html.Node) {
 		e.inScript = true
 		if attr(n, "type") == "application/ld+json" {
 			e.extractJSONLD(n)
-		}
-		if attr(n, "id") == "__NEXT_DATA__" {
+		} else if attr(n, "id") == "__NEXT_DATA__" {
 			e.extractNextData(n)
+		} else {
+			processScriptNode(n, e.embeddedScripts)
 		}
-		processScriptNode(n, e.embeddedScripts)
 	case atom.Style:
 		e.inStyle = true
 	case atom.Noscript:

@@ -247,13 +247,17 @@ func extractWindowAssign(text, propName string) any {
 		`window["` + propName + `"]`,
 	}
 	for _, prefix := range candidates {
-		idx := strings.Index(text, prefix)
-		if idx < 0 {
-			continue
-		}
-		rest := text[idx+len(prefix):]
-		if data := findJSONAfterEquals(rest); data != nil {
-			return data
+		remaining := text
+		for {
+			idx := strings.Index(remaining, prefix)
+			if idx < 0 {
+				break
+			}
+			afterIdx := idx + len(prefix)
+			if data := findJSONAfterEquals(remaining[afterIdx:]); data != nil {
+				return data
+			}
+			remaining = remaining[afterIdx:]
 		}
 	}
 	return nil
@@ -306,6 +310,9 @@ func extractJSONObject(s string) any {
 			depth++
 		case '}', ']':
 			depth--
+			if depth < 0 {
+				return nil
+			}
 			if depth == 0 {
 				candidate := s[:i+1]
 				var parsed any

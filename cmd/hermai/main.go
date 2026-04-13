@@ -51,6 +51,11 @@ by observing browser network traffic and producing structured JSON schemas.`,
 	root.AddCommand(newSessionCmd())
 	root.AddCommand(newProbeCmd())
 	root.AddCommand(newExtractCmd())
+	root.AddCommand(newWellKnownCmd())
+	root.AddCommand(newIntrospectCmd())
+	root.AddCommand(newReplayCmd())
+	root.AddCommand(newDetectCmd())
+	root.AddCommand(newInterceptCmd())
 
 	// Phase 2 commands — gated behind HERMAI_PHASE2=1 so the code stays
 	// intact but doesn't clutter the Phase 1 CLI surface.

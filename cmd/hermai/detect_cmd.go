@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -44,7 +45,7 @@ var platformSignals = []detectionSignal{
 }
 
 var antibotDetectionSignals = []detectionSignal{
-	{"Cloudflare", "cf-ray", false, "CF-RAY"},
+	// CF-RAY header excluded: present on ALL Cloudflare-proxied sites, not just challenges.
 	{"Cloudflare", "cf_chl_opt", true, ""},
 	{"Cloudflare", "cf-browser-verification", true, ""},
 	{"Cloudflare", "challenges.cloudflare.com", true, ""},
@@ -128,23 +129,19 @@ Examples:
 			}
 
 			if len(antibotFound) > 0 {
-				systems := make([]string, 0, len(antibotFound))
-				for name := range antibotFound {
-					systems = append(systems, name)
-				}
-				output["antibot"] = systems
+				output["antibot"] = sortedKeys(antibotFound)
 			}
 
 			if len(platformFound) > 0 {
-				platforms := make([]string, 0, len(platformFound))
-				for name := range platformFound {
-					platforms = append(platforms, name)
-				}
-				output["platform"] = platforms
+				output["platform"] = sortedKeys(platformFound)
 			}
 
 			statusBlocked := resp.StatusCode == 403 || resp.StatusCode == 429 || resp.StatusCode == 503
-			if statusBlocked || len(antibotFound) > 0 {
+			// A challenge-only page has antibot markers but no real platform
+			// content. Sites like TechCrunch serve real WordPress pages with
+			// Cloudflare JS embedded — those are not blocked.
+			challengePage := len(antibotFound) > 0 && len(platformFound) == 0
+			if statusBlocked || challengePage {
 				output["blocked"] = true
 			}
 
@@ -179,4 +176,13 @@ func matchSignals(signals []detectionSignal, bodyLower string, headers http.Head
 		}
 	}
 	return found
+}
+
+func sortedKeys(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

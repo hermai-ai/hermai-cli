@@ -127,24 +127,18 @@ Examples:
 					if err != nil {
 						return
 					}
-					io.Copy(io.Discard, resp.Body)
+					bodySize, _ := io.Copy(io.Discard, resp.Body)
 					resp.Body.Close()
 
-					// 2xx = exists. For GraphQL, 400/405 also indicate the
-					// endpoint exists (rejects GET but responds to POST).
-					found := resp.StatusCode >= 200 && resp.StatusCode < 300
-					if !found && graphqlTypes[wk.Type] && (resp.StatusCode == 400 || resp.StatusCode == 405) {
-						found = true
+					hit := resp.StatusCode >= 200 && resp.StatusCode < 300
+					if !hit && graphqlTypes[wk.Type] && (resp.StatusCode == 400 || resp.StatusCode == 405) {
+						hit = true
 					}
-					if !found {
+					if !hit {
 						return
 					}
 
 					ct := resp.Header.Get("Content-Type")
-					cl := int(resp.ContentLength)
-					if cl < 0 {
-						cl = 0
-					}
 
 					mu.Lock()
 					results = append(results, indexedResult{idx, wellKnownResult{
@@ -154,7 +148,7 @@ Examples:
 						Description: wk.Description,
 						Status:      resp.StatusCode,
 						ContentType: ct,
-						Size:        cl,
+						Size:        int(bodySize),
 					}})
 					mu.Unlock()
 				}(i, wk)

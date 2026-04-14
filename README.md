@@ -43,6 +43,38 @@ hermai cache list
 
 Run `hermai --help` for the full command list, and `hermai doctor` to verify your environment is ready.
 
+## Discovery toolkit
+
+A set of deterministic subcommands for inspecting a site and contributing a schema to the registry. No LLM key required — each tool does one thing and emits structured output the next step can consume.
+
+```bash
+hermai detect <url>                          # classify platform + anti-bot
+hermai wellknown <domain>                    # probe robots, sitemap, RSS, GraphQL
+hermai probe --body <url> | hermai extract   # pull embedded data patterns
+hermai intercept <url>                       # capture XHR calls in a browser
+hermai introspect <graphql-url>              # GraphQL schema via introspection
+hermai replay request.json                   # replay captured requests
+hermai session bootstrap <site>              # warm a browser session for anti-bot sites
+hermai registry push schema.json             # contribute to the hermai.ai catalog
+```
+
+`hermai extract` recognises 13 embedded-data patterns — `__NEXT_DATA__`, `ytInitialData`, `__APOLLO_STATE__`, `__NUXT_DATA__`, `SIGI_STATE`, `__PRELOADED_STATE__`, and more. Run `hermai extract --list-patterns` for the full list.
+
+## Agent skills
+
+If you're using Claude Code, Codex, Cursor, or another agent with the [Vercel skills CLI](https://github.com/vercel-labs/skills), install the Hermai skills so your agent knows how to use this CLI:
+
+```bash
+npx skills add hermai-ai/hermai-skills
+```
+
+Two skills ship together:
+
+- **`hermai`** — teaches agents to call the registry and fetch data from already-registered sites.
+- **`hermai-contribute`** — teaches agents the discovery toolkit and schema format so they can add new sites to the catalog.
+
+Details: [hermai-ai/hermai-skills](https://github.com/hermai-ai/hermai-skills).
+
 ## How it works
 
 `hermai` walks a cheapest-path-first pipeline:

@@ -121,11 +121,18 @@ func buildExtractOutput(page htmlext.PageContent) map[string]any {
 	if len(page.JSONLD) > 0 {
 		output["json_ld"] = page.JSONLD
 	}
-	if page.NextData != nil {
-		output["next_data"] = page.NextData
-	}
-	if len(page.EmbeddedScripts) > 0 {
-		output["embedded_scripts"] = page.EmbeddedScripts
+	// Unify __NEXT_DATA__ with the other embedded-script patterns under a
+	// single `patterns` key. Agents read one field to find any SSR/hydration
+	// payload regardless of framework.
+	if page.NextData != nil || len(page.EmbeddedScripts) > 0 {
+		patterns := make(map[string]any, len(page.EmbeddedScripts)+1)
+		for k, v := range page.EmbeddedScripts {
+			patterns[k] = v
+		}
+		if page.NextData != nil {
+			patterns["__NEXT_DATA__"] = page.NextData
+		}
+		output["patterns"] = patterns
 	}
 	if len(page.Forms) > 0 {
 		output["forms"] = page.Forms

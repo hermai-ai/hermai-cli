@@ -1,5 +1,7 @@
 # hermai-cli
 
+**English** · [繁體中文](./README.zh-Hant.md) · [简体中文](./README.zh-Hans.md)
+
 > Discover, contribute, and call structured website APIs from your terminal.
 
 `hermai` is the open-source CLI for the [Hermai registry](https://hermai.ai) — a community catalog of website API schemas for AI agents. Probe a site to document its endpoints, push the schema to the catalog, or pull existing schemas your agent can call.

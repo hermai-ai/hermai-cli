@@ -269,7 +269,142 @@ func findJSONAfterEquals(s string) any {
 		return nil
 	}
 	s = strings.TrimSpace(s[1:])
-	return extractJSONObject(s)
+	if data := extractJSONObject(s); data != nil {
+		return data
+	}
+	return extractJSONParseCall(s)
+}
+
+// extractJSONParseCall handles state assigned via `JSON.parse('...')` or
+// `JSON.parse("...")`. The wrapping is common on sites that server-render
+// pre-escaped JSON strings to avoid HTML-escaping pitfalls (Genius, TikTok,
+// others). Returns the parsed JSON value or nil if not this shape.
+func extractJSONParseCall(s string) any {
+	const prefix = "JSON.parse("
+	if !strings.HasPrefix(s, prefix) {
+		return nil
+	}
+	s = strings.TrimSpace(s[len(prefix):])
+	if len(s) == 0 {
+		return nil
+	}
+	quote := s[0]
+	if quote != '\'' && quote != '"' {
+		return nil
+	}
+
+	end := -1
+	for i := 1; i < len(s); i++ {
+		if s[i] == '\\' {
+			i++
+			continue
+		}
+		if s[i] == quote {
+			end = i
+			break
+		}
+	}
+	if end < 0 {
+		return nil
+	}
+	raw := s[1:end]
+
+	unescaped := unescapeJSString(raw)
+	var parsed any
+	if err := json.Unmarshal([]byte(unescaped), &parsed); err != nil {
+		return nil
+	}
+	if isEmpty(parsed) {
+		return nil
+	}
+	return parsed
+}
+
+// unescapeJSString decodes a JavaScript string literal body into its
+// runtime value. JSON's escape set is a strict subset — JS allows `\'`,
+// `\$`, `\a` and other "any char" escapes that JSON rejects. We interpret
+// the JS semantics so the result can be fed into json.Unmarshal.
+func unescapeJSString(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if c != '\\' || i+1 >= len(s) {
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		next := s[i+1]
+		switch next {
+		case 'n':
+			b.WriteByte('\n')
+			i += 2
+		case 't':
+			b.WriteByte('\t')
+			i += 2
+		case 'r':
+			b.WriteByte('\r')
+			i += 2
+		case 'b':
+			b.WriteByte('\b')
+			i += 2
+		case 'f':
+			b.WriteByte('\f')
+			i += 2
+		case 'v':
+			b.WriteByte('\v')
+			i += 2
+		case '0':
+			b.WriteByte(0)
+			i += 2
+		case 'x':
+			if i+3 < len(s) {
+				if v, ok := parseHex(s[i+2 : i+4]); ok {
+					b.WriteByte(byte(v))
+					i += 4
+					continue
+				}
+			}
+			b.WriteByte(next)
+			i += 2
+		case 'u':
+			if i+5 < len(s) {
+				if v, ok := parseHex(s[i+2 : i+6]); ok {
+					b.WriteRune(rune(v))
+					i += 6
+					continue
+				}
+			}
+			b.WriteByte(next)
+			i += 2
+		default:
+			// JS: any unrecognised escape drops the backslash (\$ → $,
+			// \' → ', \a → a). This is the semantics we're restoring.
+			b.WriteByte(next)
+			i += 2
+		}
+	}
+	return b.String()
+}
+
+func parseHex(s string) (int, bool) {
+	v := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		v <<= 4
+		switch {
+		case c >= '0' && c <= '9':
+			v |= int(c - '0')
+		case c >= 'a' && c <= 'f':
+			v |= int(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			v |= int(c-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return v, true
 }
 
 // extractJSONObject extracts a complete JSON value from the start of s

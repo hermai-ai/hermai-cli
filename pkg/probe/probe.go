@@ -209,8 +209,8 @@ func runConcurrent(ctx context.Context, client httpclient.Doer, targetURL string
 	return outcome
 }
 
-// NewClient builds an HTTP client from probe options, using stealth TLS
-// fingerprinting when requested.
+// NewClient builds an HTTP client from probe options. Follows up to 10
+// redirects so callers see the final response instead of 301/302 hops.
 func NewClient(opts Options) httpclient.Doer {
 	timeout := opts.Timeout
 	if timeout == 0 {
@@ -222,7 +222,10 @@ func NewClient(opts Options) httpclient.Doer {
 		Timeout:  timeout,
 	}
 	if opts.Stealth {
-		return httpclient.NewStealthOrFallback(clientOpts)
+		if c, err := httpclient.NewStealthWithRedirects(clientOpts, 10); err == nil {
+			return c
+		}
+		// Fall through to plain client if stealth init fails.
 	}
 	return httpclient.New(clientOpts)
 }

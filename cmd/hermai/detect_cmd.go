@@ -20,29 +20,12 @@ type detectionSignal struct {
 	InHeader string
 }
 
-var platformSignals = []detectionSignal{
-	{"WordPress", "wp-content", true, ""},
-	{"WordPress", "wp-includes", true, ""},
-	{"Shopify", "cdn.shopify.com", true, ""},
-	{"Shopify", "myshopify.com", true, ""},
-	{"Next.js", "__NEXT_DATA__", true, ""},
-	{"Nuxt", "__NUXT__", true, ""},
-	{"Nuxt", "__NUXT_DATA__", true, ""},
-	{"React", "react-root", true, ""},
-	{"React", "_reactRootContainer", true, ""},
-	{"Angular", "ng-version", true, ""},
-	{"Vue.js", "__vue__", true, ""},
-	{"Remix", "__remixContext", true, ""},
-	{"Gatsby", "gatsby-", true, ""},
-	{"Wix", "wix.com", true, ""},
-	{"Squarespace", "squarespace.com", true, ""},
-	{"Drupal", "drupal", true, ""},
-	{"Django", "csrfmiddlewaretoken", true, ""},
-	{"Ruby on Rails", "csrf-token", true, ""},
-	{"Laravel", "laravel_session", true, ""},
-	{"ASP.NET", "__VIEWSTATE", true, ""},
-	{"ASP.NET", "asp.net", false, "X-Powered-By"},
-}
+// platformSignals is intentionally minimal. Maintaining a comprehensive
+// platform catalogue in the binary doesn't scale — thousands of platforms
+// exist and new ones ship constantly. Instead, detect extracts structural
+// evidence (script hosts, CDN preconnects, generator meta, x-powered-by,
+// server header) that the agent composes into a platform identification.
+// A richer list can come from the registry later.
 
 var antibotDetectionSignals = []detectionSignal{
 	// CF-RAY header excluded: present on ALL Cloudflare-proxied sites, not just challenges.
@@ -117,37 +100,56 @@ Examples:
 			if err != nil {
 				return fmt.Errorf("failed to read response: %w", err)
 			}
-			bodyStr := strings.ToLower(string(bodyBytes))
-
-			// Detect anti-bot systems
-			antibotFound := matchSignals(antibotDetectionSignals, bodyStr, resp.Header)
-			platformFound := matchSignals(platformSignals, bodyStr, resp.Header)
+			body := string(bodyBytes)
+			bodyLower := strings.ToLower(body)
 
 			output := map[string]any{
-				"url":         targetURL,
-				"status":      resp.StatusCode,
+				"url":    targetURL,
+				"status": resp.StatusCode,
 			}
-
-			if len(antibotFound) > 0 {
-				output["antibot"] = sortedKeys(antibotFound)
-			}
-
-			if len(platformFound) > 0 {
-				output["platform"] = sortedKeys(platformFound)
-			}
-
-			statusBlocked := resp.StatusCode == 403 || resp.StatusCode == 429 || resp.StatusCode == 503
-			// A challenge-only page has antibot markers but no real platform
-			// content. Sites like TechCrunch serve real WordPress pages with
-			// Cloudflare JS embedded — those are not blocked.
-			challengePage := len(antibotFound) > 0 && len(platformFound) == 0
-			if statusBlocked || challengePage {
-				output["blocked"] = true
-			}
-
-			server := resp.Header.Get("Server")
-			if server != "" {
+			if server := resp.Header.Get("Server"); server != "" {
 				output["server"] = server
+			}
+			if xpb := resp.Header.Get("X-Powered-By"); xpb != "" {
+				output["x_powered_by"] = xpb
+			}
+
+			// Structural evidence — mechanical extractions the agent uses
+			// to identify the platform without a hardcoded catalogue.
+			if gen := extractMetaGenerator(body); gen != "" {
+				output["meta_generator"] = gen
+			}
+			if hosts := extractScriptHosts(body); len(hosts) > 0 {
+				output["script_hosts"] = hosts
+			}
+			if hosts := extractPreconnectHosts(body); len(hosts) > 0 {
+				output["preconnect_hosts"] = hosts
+			}
+
+			// Anti-bot markers remain curated: small, stable, well-known set
+			// where early warning matters more than exhaustive coverage.
+			if hits := collectHits(antibotDetectionSignals, bodyLower, resp.Header); len(hits) > 0 {
+				output["antibot_signals"] = hits
+			}
+
+			// blocking_indicators: mechanical signals only. Agent decides
+			// what they mean in context.
+			var indicators []string
+			switch resp.StatusCode {
+			case 403:
+				indicators = append(indicators, "status:403")
+			case 429:
+				indicators = append(indicators, "status:429")
+			case 503:
+				indicators = append(indicators, "status:503")
+			case 202:
+				indicators = append(indicators, "status:202 (AWS WAF challenge pattern)")
+			}
+			if len(bodyBytes) < 50*1024 {
+				indicators = append(indicators, fmt.Sprintf("small_body (%d bytes)", len(bodyBytes)))
+			}
+			if len(indicators) > 0 {
+				output["blocking_indicators"] = indicators
 			}
 
 			return writeJSON(os.Stdout, output, format)
@@ -163,26 +165,171 @@ Examples:
 	return cmd
 }
 
-func matchSignals(signals []detectionSignal, bodyLower string, headers http.Header) map[string]bool {
-	found := make(map[string]bool)
-	for _, sig := range signals {
-		if sig.InBody && strings.Contains(bodyLower, strings.ToLower(sig.Marker)) {
-			found[sig.Name] = true
+// extractMetaGenerator returns the content of <meta name="generator">
+// which many platforms self-identify with (WordPress, Drupal, Hugo, etc.).
+func extractMetaGenerator(html string) string {
+	return firstMetaContent(html, "generator")
+}
+
+func firstMetaContent(html, name string) string {
+	// Minimal parse: find <meta name="NAME" content="...">
+	lower := strings.ToLower(html)
+	needle := `name="` + strings.ToLower(name) + `"`
+	idx := strings.Index(lower, needle)
+	if idx < 0 {
+		needle = `name='` + strings.ToLower(name) + `'`
+		idx = strings.Index(lower, needle)
+		if idx < 0 {
+			return ""
 		}
-		if sig.InHeader != "" {
-			if val := headers.Get(sig.InHeader); val != "" && strings.Contains(strings.ToLower(val), strings.ToLower(sig.Marker)) {
-				found[sig.Name] = true
+	}
+	// Look backward for the start of the meta tag, forward for content=""
+	tagStart := strings.LastIndex(lower[:idx], "<meta")
+	tagEnd := strings.Index(lower[idx:], ">")
+	if tagStart < 0 || tagEnd < 0 {
+		return ""
+	}
+	tag := html[tagStart : idx+tagEnd+1]
+	for _, quote := range []string{`content="`, `content='`} {
+		if ci := strings.Index(strings.ToLower(tag), quote); ci >= 0 {
+			rest := tag[ci+len(quote):]
+			closeQuote := quote[len(quote)-1]
+			end := strings.IndexByte(rest, closeQuote)
+			if end > 0 {
+				return rest[:end]
 			}
 		}
 	}
-	return found
+	return ""
 }
 
-func sortedKeys(m map[string]bool) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
+// extractScriptHosts returns unique, sorted hostnames of <script src="...">.
+// Agents use these to identify platforms (cdn.shoplineapp.com → Shopline,
+// cdn.shopify.com → Shopify, etc.) without a hardcoded catalogue.
+func extractScriptHosts(html string) []string {
+	return uniqueHostsFrom(html, `src="`, `src='`)
+}
+
+// extractPreconnectHosts returns hosts from <link rel="preconnect"> and
+// <link rel="dns-prefetch"> — strong platform signals since they're
+// curated by the site itself.
+func extractPreconnectHosts(html string) []string {
+	lower := strings.ToLower(html)
+	var hosts []string
+	seen := make(map[string]bool)
+	for _, rel := range []string{`rel="preconnect"`, `rel="dns-prefetch"`, `rel='preconnect'`, `rel='dns-prefetch'`} {
+		start := 0
+		for {
+			i := strings.Index(lower[start:], rel)
+			if i < 0 {
+				break
+			}
+			i += start
+			// find the <link ...> around this match
+			tagStart := strings.LastIndex(lower[:i], "<link")
+			tagEnd := strings.Index(lower[i:], ">")
+			if tagStart < 0 || tagEnd < 0 {
+				start = i + len(rel)
+				continue
+			}
+			tag := html[tagStart : i+tagEnd+1]
+			for _, quote := range []string{`href="`, `href='`} {
+				if hi := strings.Index(strings.ToLower(tag), quote); hi >= 0 {
+					rest := tag[hi+len(quote):]
+					closeQuote := quote[len(quote)-1]
+					end := strings.IndexByte(rest, closeQuote)
+					if end > 0 {
+						if h := hostOnly(rest[:end]); h != "" && !seen[h] {
+							seen[h] = true
+							hosts = append(hosts, h)
+						}
+					}
+				}
+			}
+			start = i + len(rel)
+		}
 	}
-	sort.Strings(keys)
-	return keys
+	sort.Strings(hosts)
+	return hosts
+}
+
+func uniqueHostsFrom(html string, quotes ...string) []string {
+	var hosts []string
+	seen := make(map[string]bool)
+	for _, prefix := range quotes {
+		start := 0
+		for {
+			i := strings.Index(html[start:], prefix)
+			if i < 0 {
+				break
+			}
+			i += start + len(prefix)
+			closeQuote := prefix[len(prefix)-1]
+			end := strings.IndexByte(html[i:], closeQuote)
+			if end < 0 {
+				break
+			}
+			if h := hostOnly(html[i : i+end]); h != "" && !seen[h] {
+				seen[h] = true
+				hosts = append(hosts, h)
+			}
+			start = i + end
+		}
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
+// hostOnly extracts the host from a URL. Returns "" for relative URLs
+// (not useful as platform signals).
+func hostOnly(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") && !strings.HasPrefix(rawURL, "//") {
+		return ""
+	}
+	rawURL = strings.TrimPrefix(rawURL, "http://")
+	rawURL = strings.TrimPrefix(rawURL, "https://")
+	rawURL = strings.TrimPrefix(rawURL, "//")
+	if i := strings.IndexAny(rawURL, "/?#"); i >= 0 {
+		rawURL = rawURL[:i]
+	}
+	return rawURL
+}
+
+type signalHit struct {
+	Name     string `json:"name"`
+	Location string `json:"location"` // "body" or "header:<name>"
+	Marker   string `json:"marker"`
+}
+
+// collectHits returns one entry per marker match, preserving evidence.
+// Multiple hits for the same platform name are kept — the caller decides
+// how to weight "one string reference" vs "multiple strong markers".
+func collectHits(signals []detectionSignal, bodyLower string, headers http.Header) []signalHit {
+	var hits []signalHit
+	for _, sig := range signals {
+		if sig.InBody && strings.Contains(bodyLower, strings.ToLower(sig.Marker)) {
+			hits = append(hits, signalHit{
+				Name:     sig.Name,
+				Location: "body",
+				Marker:   sig.Marker,
+			})
+		}
+		if sig.InHeader != "" {
+			if val := headers.Get(sig.InHeader); val != "" && strings.Contains(strings.ToLower(val), strings.ToLower(sig.Marker)) {
+				hits = append(hits, signalHit{
+					Name:     sig.Name,
+					Location: "header:" + sig.InHeader,
+					Marker:   sig.Marker,
+				})
+			}
+		}
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].Name != hits[j].Name {
+			return hits[i].Name < hits[j].Name
+		}
+		return hits[i].Location < hits[j].Location
+	})
+	return hits
 }

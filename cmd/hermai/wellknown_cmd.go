@@ -39,9 +39,6 @@ var defaultWellKnownPaths = []wellKnownPath{
 	{"/.json", "json", "JSON representation"},
 }
 
-// GraphQL endpoints often reject GET with 400/405 but still exist.
-var graphqlTypes = map[string]bool{"graphql": true}
-
 type wellKnownResult struct {
 	Path        string `json:"path"`
 	URL         string `json:"url"`
@@ -130,16 +127,6 @@ Examples:
 					bodySize, _ := io.Copy(io.Discard, resp.Body)
 					resp.Body.Close()
 
-					hit := resp.StatusCode >= 200 && resp.StatusCode < 300
-					if !hit && graphqlTypes[wk.Type] && (resp.StatusCode == 400 || resp.StatusCode == 405) {
-						hit = true
-					}
-					if !hit {
-						return
-					}
-
-					ct := resp.Header.Get("Content-Type")
-
 					mu.Lock()
 					results = append(results, indexedResult{idx, wellKnownResult{
 						Path:        wk.Path,
@@ -147,7 +134,7 @@ Examples:
 						Type:        wk.Type,
 						Description: wk.Description,
 						Status:      resp.StatusCode,
-						ContentType: ct,
+						ContentType: resp.Header.Get("Content-Type"),
 						Size:        int(bodySize),
 					}})
 					mu.Unlock()
@@ -164,13 +151,12 @@ Examples:
 				found[i] = r.result
 			}
 
+			// Report every probe with its status code. The agent decides
+			// which statuses mean "exists" for its purpose — e.g. a GraphQL
+			// endpoint often returns 400/405 to GET but still exists.
 			output := map[string]any{
-				"domain": parsed.Host,
-				"probed": len(defaultWellKnownPaths),
-				"found":  len(found),
-			}
-			if len(found) > 0 {
-				output["results"] = found
+				"domain":  parsed.Host,
+				"results": found,
 			}
 
 			return writeJSON(os.Stdout, output, format)

@@ -1,8 +1,8 @@
 # hermai-cli
 
-> Turn any website into structured JSON for AI agents.
+> Discover, contribute, and call structured website APIs from your terminal.
 
-`hermai` captures the same XHRs a page's own JavaScript uses, caches them as a schema, and replays that schema on every future call as a single HTTP request. No browser, no scraper, no LLM key required for the cached path.
+`hermai` is the open-source CLI for the [Hermai registry](https://hermai.ai) — a community catalog of website API schemas for AI agents. Probe a site to document its endpoints, push the schema to the catalog, or pull existing schemas your agent can call.
 
 ```bash
 go install github.com/hermai-ai/hermai-cli/cmd/hermai@latest
@@ -18,24 +18,23 @@ Running in Claude Code, Codex, Cursor, or another agent? Install the skills so t
 npx skills add hermai-ai/hermai-skills
 ```
 
-- **`hermai`** — call the registry, fetch data from already-registered sites.
-- **`hermai-contribute`** — use the discovery toolkit to add a new site.
+- **`hermai`** — call the registry and consume schemas.
+- **`hermai-contribute`** — use the discovery toolkit to add a site.
 
 Repo: [hermai-ai/hermai-skills](https://github.com/hermai-ai/hermai-skills).
 
-## Use
+## Registry
 
 ```bash
-hermai fetch https://example.com/products/abc   # structured JSON from a page
-hermai catalog https://example.com              # list discovered endpoints
-hermai execute https://example.com/search '{"q":"laptop"}'
+hermai registry login                         # GitHub OAuth, stores API key
+hermai registry list                          # browse the catalog
+hermai registry pull <site> --intent "..."    # download a schema
+hermai registry push schema.json              # contribute a schema
 ```
-
-`hermai --help` for everything, `hermai doctor` to verify your environment.
 
 ## Discovery toolkit
 
-Deterministic subcommands for documenting a site and pushing a schema to [hermai.ai](https://hermai.ai). No LLM key; each command prints JSON the next step can consume.
+Deterministic subcommands for composing a new schema. No LLM key — each prints JSON the next step can consume.
 
 ```bash
 hermai detect <url>                          # platform + anti-bot classification
@@ -45,8 +44,9 @@ hermai intercept <url>                       # capture XHR in a browser
 hermai introspect <graphql-url>              # GraphQL schema
 hermai replay request.json                   # replay a captured request
 hermai session bootstrap <site>              # warm browser for anti-bot sites
-hermai registry push schema.json             # contribute to the catalog
 ```
+
+`hermai --help` for everything, `hermai doctor` to verify your setup.
 
 ## Docs
 

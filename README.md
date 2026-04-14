@@ -46,7 +46,17 @@ hermai replay request.json                   # replay a captured request
 hermai session bootstrap <site>              # warm browser for anti-bot sites
 ```
 
-`hermai --help` for everything, `hermai doctor` to verify your setup.
+## Local cache
+
+```bash
+hermai catalog <url>                          # summarize cached endpoints for a URL
+hermai schema <url>                           # show the cached schema JSON
+hermai cache list                             # list cached domains
+hermai init                                   # create ~/.hermai/config.yaml
+hermai doctor                                 # verify your setup
+```
+
+`hermai --help` for the full command list.
 
 ## Docs
 

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -181,20 +180,7 @@ Examples:
 				Actions:  catalogData.Actions,
 			}
 
-			var output []byte
-			var marshalErr error
-			switch format {
-			case "compact":
-				output, marshalErr = json.Marshal(catalog)
-			default:
-				output, marshalErr = json.MarshalIndent(catalog, "", "  ")
-			}
-			if marshalErr != nil {
-				return fmt.Errorf("failed to marshal catalog: %w", marshalErr)
-			}
-			fmt.Fprintln(os.Stdout, string(output))
-
-			return nil
+			return writeJSON(os.Stdout, catalog, format)
 		},
 	}
 

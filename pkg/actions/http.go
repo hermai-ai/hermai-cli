@@ -12,7 +12,7 @@ import (
 	"github.com/hermai-ai/hermai-cli/pkg/schema"
 )
 
-const browserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+var browserUserAgent = httpclient.BrowserUserAgent
 
 type pageResponse struct {
 	FinalURL    string

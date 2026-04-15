@@ -25,3 +25,6 @@ Thumbs.db
 
 # Local agent skills
 .agents/
+
+# Discovery artifacts from ad-hoc runs
+*.schema.json

@@ -20,20 +20,21 @@ const (
 
 // PageContent is the structured data extracted from an HTML page.
 type PageContent struct {
-	Title       string            `json:"title"`
-	Description string            `json:"description,omitempty"`
-	Language    string            `json:"language,omitempty"`
-	Canonical   string            `json:"canonical,omitempty"`
-	OpenGraph   map[string]string `json:"open_graph,omitempty"`
-	Meta        map[string]string `json:"meta,omitempty"`
-	JSONLD      []any             `json:"json_ld,omitempty"`
-	NextData    any               `json:"next_data,omitempty"` // __NEXT_DATA__ from Next.js SSR
-	Headings    []Heading         `json:"headings,omitempty"`
-	Links       []Link            `json:"links,omitempty"`
-	Images      []Image           `json:"images,omitempty"`
-	Forms       []Form            `json:"forms,omitempty"`
-	BodyText    string            `json:"body_text"`
-	HasArticle  bool              `json:"has_article,omitempty"`
+	Title           string            `json:"title"`
+	Description     string            `json:"description,omitempty"`
+	Language        string            `json:"language,omitempty"`
+	Canonical       string            `json:"canonical,omitempty"`
+	OpenGraph       map[string]string `json:"open_graph,omitempty"`
+	Meta            map[string]string `json:"meta,omitempty"`
+	JSONLD          []any             `json:"json_ld,omitempty"`
+	NextData        any               `json:"next_data,omitempty"`        // __NEXT_DATA__ from Next.js SSR
+	EmbeddedScripts map[string]any    `json:"embedded_scripts,omitempty"` // All detected embedded data patterns
+	Headings        []Heading         `json:"headings,omitempty"`
+	Links           []Link            `json:"links,omitempty"`
+	Images          []Image           `json:"images,omitempty"`
+	Forms           []Form            `json:"forms,omitempty"`
+	BodyText        string            `json:"body_text"`
+	HasArticle      bool              `json:"has_article,omitempty"`
 }
 
 // Heading represents an HTML heading element.
@@ -83,8 +84,9 @@ func Extract(rawHTML string, baseURL string) PageContent {
 
 	// First pass: collect metadata from entire document (title, meta, OG, JSON-LD)
 	e := &extractor{
-		base:    base,
-		seenURL: make(map[string]bool),
+		base:            base,
+		seenURL:         make(map[string]bool),
+		embeddedScripts: make(map[string]any),
 	}
 	e.walk(doc)
 
@@ -101,21 +103,30 @@ func Extract(rawHTML string, baseURL string) PageContent {
 		bodyText = truncate(collapseWhitespace(e.body.String()), maxBodyText)
 	}
 
+	// Exclude __NEXT_DATA__ from embedded scripts since it's already in the
+	// dedicated NextData field with specialized pageProps/gdpClientCache handling.
+	delete(e.embeddedScripts, "__NEXT_DATA__")
+	var embedded map[string]any
+	if len(e.embeddedScripts) > 0 {
+		embedded = e.embeddedScripts
+	}
+
 	return PageContent{
-		Title:       e.title,
-		Description: e.description,
-		Language:    e.language,
-		Canonical:   e.canonical,
-		OpenGraph:   nonEmpty(e.og),
-		Meta:        nonEmpty(e.meta),
-		JSONLD:      e.jsonLD,
-		NextData:    e.nextData,
-		Headings:    e.headings,
-		Links:       e.links,
-		Images:      e.images,
-		Forms:       e.forms,
-		BodyText:    bodyText,
-		HasArticle:  e.hasArticle,
+		Title:           e.title,
+		Description:     e.description,
+		Language:        e.language,
+		Canonical:       e.canonical,
+		OpenGraph:       nonEmpty(e.og),
+		Meta:            nonEmpty(e.meta),
+		JSONLD:          e.jsonLD,
+		NextData:        e.nextData,
+		EmbeddedScripts: embedded,
+		Headings:        e.headings,
+		Links:           e.links,
+		Images:          e.images,
+		Forms:           e.forms,
+		BodyText:        bodyText,
+		HasArticle:      e.hasArticle,
 	}
 }
 
@@ -240,20 +251,21 @@ type extractor struct {
 	base    *url.URL
 	seenURL map[string]bool
 
-	title       string
-	description string
-	language    string
-	canonical   string
-	og          map[string]string
-	meta        map[string]string
-	jsonLD      []any
-	nextData    any
-	headings    []Heading
-	links       []Link
-	images      []Image
-	forms       []Form
-	body        strings.Builder
-	hasArticle  bool
+	title           string
+	description     string
+	language        string
+	canonical       string
+	og              map[string]string
+	meta            map[string]string
+	jsonLD          []any
+	nextData        any
+	embeddedScripts map[string]any
+	headings        []Heading
+	links           []Link
+	images          []Image
+	forms           []Form
+	body            strings.Builder
+	hasArticle      bool
 
 	inTitle  bool
 	inScript bool
@@ -301,9 +313,10 @@ func (e *extractor) enterElement(n *html.Node) {
 		e.inScript = true
 		if attr(n, "type") == "application/ld+json" {
 			e.extractJSONLD(n)
-		}
-		if attr(n, "id") == "__NEXT_DATA__" {
+		} else if attr(n, "id") == "__NEXT_DATA__" {
 			e.extractNextData(n)
+		} else {
+			processScriptNode(n, e.embeddedScripts)
 		}
 	case atom.Style:
 		e.inStyle = true
@@ -552,34 +565,24 @@ func parseSelectOptions(n *html.Node) ([]string, string) {
 }
 
 func (e *extractor) extractNextData(n *html.Node) {
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if c.Type != html.TextNode {
-			continue
-		}
-		text := strings.TrimSpace(c.Data)
-		if text == "" {
-			continue
-		}
-		var parsed any
-		if err := json.Unmarshal([]byte(text), &parsed); err == nil {
-			e.nextData = parsed
-		}
+	text := strings.TrimSpace(scriptText(n))
+	if text == "" {
+		return
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(text), &parsed); err == nil {
+		e.nextData = parsed
 	}
 }
 
 func (e *extractor) extractJSONLD(n *html.Node) {
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if c.Type != html.TextNode {
-			continue
-		}
-		text := strings.TrimSpace(c.Data)
-		if text == "" {
-			continue
-		}
-		var parsed any
-		if err := json.Unmarshal([]byte(text), &parsed); err == nil {
-			e.jsonLD = append(e.jsonLD, parsed)
-		}
+	text := strings.TrimSpace(scriptText(n))
+	if text == "" {
+		return
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(text), &parsed); err == nil {
+		e.jsonLD = append(e.jsonLD, parsed)
 	}
 }
 

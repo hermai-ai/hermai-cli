@@ -1,82 +1,70 @@
 # hermai-cli
 
-> The open-source engine that turns any website into structured JSON for AI agents.
+**English** · [繁體中文](./README.zh-Hant.md) · [简体中文](./README.zh-Hans.md)
 
-`hermai` discovers website APIs by watching browser network traffic, caches what it learns as a schema, and replays the schema on future runs without launching a browser. It is the local execution engine behind the [Hermai](https://hermai.ai) hosted platform.
+> Discover, contribute, and call structured website APIs from your terminal.
 
-```
-URL  ─►  probe  ─►  schema  ─►  fast JSON forever
-                       │
-                       └─►  pushed to hermai.ai (optional)
-```
-
-## Why
-
-Agents that need data from websites without public APIs end up in one of two bad places: they ship a brittle CSS scraper, or they pay a hosted browser per page-load. `hermai` does the discovery work *once* — capturing the same XHRs the page itself uses — then re-uses that knowledge as a cached schema. The first call is slow. Every call after is a single HTTP request.
-
-## Install
-
-Until binaries are published:
+`hermai` is the open-source CLI for the [Hermai registry](https://hermai.ai) — a community catalog of website API schemas for AI agents. Probe a site to document its endpoints, push the schema to the catalog, or pull existing schemas your agent can call.
 
 ```bash
 go install github.com/hermai-ai/hermai-cli/cmd/hermai@latest
 ```
 
-Brew, npm, and pre-built release binaries are coming soon — see [issues](https://github.com/hermai-ai/hermai-cli/issues) for status.
+Homebrew, npm, and prebuilt binaries coming soon.
 
-## Quickstart
+## Agent skills
+
+Running in Claude Code, Codex, Cursor, or another agent? Install the skills so the agent knows how to use this CLI:
 
 ```bash
-# Discover the API behind a page and emit structured JSON
-hermai fetch https://example.com/products/abc
-
-# Show every action and endpoint discovered for a site
-hermai catalog https://example.com
-
-# Execute an action without a browser (replays a cached schema)
-hermai execute https://example.com/search '{"q":"laptop"}'
-
-# Inspect or clear the local schema cache
-hermai schema https://example.com
-hermai cache list
+npx skills add hermai-ai/hermai-skills
 ```
 
-Run `hermai --help` for the full command list, and `hermai doctor` to verify your environment is ready.
+- **`hermai`** — call the registry and consume schemas.
+- **`hermai-contribute`** — use the discovery toolkit to add a site.
 
-## How it works
+Repo: [hermai-ai/hermai-skills](https://github.com/hermai-ai/hermai-skills).
 
-`hermai` walks a cheapest-path-first pipeline:
+## Registry
 
-1. **Probe** — try the obvious things first: `__NEXT_DATA__`, JSON-LD, sitemap, robots, common API conventions. ~83% of pages resolve here in <2 seconds with no browser.
-2. **HTML extract** — selector-driven extraction for pages that ship their data inline.
-3. **Browser + analyzer** — only as a last resort: launch a stealth Chromium via [go-rod](https://github.com/go-rod/rod), capture every XHR, and let an LLM generalize the discovered endpoints into a reusable schema.
-
-The output of step 3 is a **schema** — a small YAML file describing how to talk to the site. Future calls skip steps 1–3 entirely and replay the schema as a single HTTP request.
-
-## Project layout
-
-```
-cmd/hermai/   CLI entrypoint (cobra commands)
-pkg/          Reusable engine — probe, browser, analyzer, fetcher, schema, actions, htmlext, cache
-internal/     Private infrastructure: HTTP client, config, version
+```bash
+hermai registry login                         # GitHub OAuth, stores API key
+hermai registry list                          # browse the catalog
+hermai registry pull <site> --intent "..."    # download a schema
+hermai registry push schema.json              # contribute a schema
 ```
 
-`pkg/` is intended to be importable as a Go module — the [hermai-api](https://github.com/hermai-ai/hermai-api) hosted platform consumes it directly.
+## Discovery toolkit
 
-## Hermai CLI vs Hermai hosted
+Deterministic subcommands for composing a new schema. No LLM key — each prints JSON the next step can consume.
 
-`hermai-cli` is the engine. The [hermai.ai](https://hermai.ai) hosted platform builds on top of it: schemas you discover locally can be pushed to a community catalog, and the platform handles things that don't belong on your laptop — proxy rotation, anti-bot session management, cron-driven schema validation, and a credit-billed proxy endpoint that other agents can call.
+```bash
+hermai detect <url>                          # platform + anti-bot classification
+hermai wellknown <domain>                    # robots, sitemap, RSS, GraphQL
+hermai probe --body <url> | hermai extract   # 13 embedded-data patterns
+hermai intercept <url>                       # capture XHR in a browser
+hermai introspect <graphql-url>              # GraphQL schema
+hermai replay request.json                   # replay a captured request
+hermai session bootstrap <site>              # warm browser for anti-bot sites
+```
 
-You don't need an account to use the CLI. The hosted platform is opt-in.
+## Local cache
 
-## Documentation
+```bash
+hermai catalog <url>                          # summarize cached endpoints for a URL
+hermai schema <url>                           # show the cached schema JSON
+hermai cache list                             # list cached domains
+hermai init                                   # create ~/.hermai/config.yaml
+hermai doctor                                 # verify your setup
+```
 
-Concepts, schema format, and API reference live at [docs.hermai.ai](https://docs.hermai.ai).
+`hermai --help` for the full command list.
 
-## Contributing
+## Docs
 
-Issues and pull requests welcome. A `CONTRIBUTING.md` with the development setup, schema spec, and example schemas is on the way.
+- Concepts + schema spec — [docs.hermai.ai](https://docs.hermai.ai)
+- Hosted registry + dashboard — [hermai.ai](https://hermai.ai)
 
 ## License
 
-[GNU Affero General Public License v3.0](LICENSE) — same as [Firecrawl](https://github.com/mendableai/firecrawl). If you run a modified version of `hermai` as a hosted service, AGPL requires you to make your changes available to your users.
+[AGPL-3.0](LICENSE). Running a modified version as a hosted service requires publishing your changes.

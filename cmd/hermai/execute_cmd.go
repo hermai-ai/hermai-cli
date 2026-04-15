@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -128,18 +127,7 @@ func newExecuteCmd() *cobra.Command {
 				return err
 			}
 
-			var output []byte
-			switch format {
-			case "compact":
-				output, err = json.Marshal(result)
-			default:
-				output, err = json.MarshalIndent(result, "", "  ")
-			}
-			if err != nil {
-				return err
-			}
-			fmt.Fprintln(os.Stdout, string(output))
-			return nil
+			return writeJSON(os.Stdout, result, format)
 		},
 	}
 

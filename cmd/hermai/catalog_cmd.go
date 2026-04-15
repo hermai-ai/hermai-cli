@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -49,20 +48,7 @@ Examples:
 
 			// Build a summary from whatever's cached.
 			result := buildCatalogFromCache(targetURL, apiSchema, cssSchema)
-
-			var output []byte
-			var err error
-			switch format {
-			case "compact":
-				output, err = json.Marshal(result)
-			default:
-				output, err = json.MarshalIndent(result, "", "  ")
-			}
-			if err != nil {
-				return err
-			}
-			fmt.Fprintln(os.Stdout, string(output))
-			return nil
+			return writeJSON(os.Stdout, result, format)
 		},
 	}
 

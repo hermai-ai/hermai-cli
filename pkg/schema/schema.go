@@ -85,7 +85,15 @@ type SessionConfig struct {
 
 // Endpoint represents a single API endpoint within a schema.
 type Endpoint struct {
-	Name            string            `json:"name"`
+	Name string `json:"name"`
+	// Purpose is the user-voice one-liner that surfaces on the public
+	// catalog card. Describes what data a caller can get from this
+	// endpoint in a sentence anyone (not just an engineer) understands.
+	// The technical how-to — selectors, parse paths, script-tag ids —
+	// goes in Description, which stays paywalled inside the full
+	// package. Missing purpose → endpoint is omitted from the public
+	// card (the validator will not invent one from Description).
+	Purpose         string            `json:"purpose,omitempty"`
 	Description     string            `json:"description,omitempty"`
 	Method          string            `json:"method"`
 	URLTemplate     string            `json:"url_template"`

@@ -35,6 +35,13 @@ type Action struct {
 	URLTemplate  string             `json:"url_template"`
 	Headers      map[string]string  `json:"headers,omitempty"`
 	Params       []ActionParam      `json:"params,omitempty"`
+	// BodyTemplate, if non-empty, is used verbatim as the request body
+	// after {{var}} substitution. Substituted values are JSON-escaped so
+	// user input can't break out of the surrounding JSON string. When
+	// empty, the runner synthesizes a body by JSON-marshaling every
+	// Param with in="body" — useful for flat APIs, but most real-world
+	// endpoints need an explicit template.
+	BodyTemplate string             `json:"body_template,omitempty"`
 	Result       *ActionResult      `json:"result,omitempty"`
 	Requirements ActionRequirements `json:"requirements,omitempty"`
 	Confidence   float64            `json:"confidence,omitempty"`

@@ -34,6 +34,7 @@ type Schema struct {
 	Actions         []Action         `json:"actions,omitempty"`
 	ExtractionRules *ExtractionRules `json:"extraction_rules,omitempty"`
 	Session         *SessionConfig   `json:"session,omitempty"`
+	Runtime         *Runtime         `json:"runtime,omitempty"`
 	RequiresStealth bool             `json:"requires_stealth,omitempty"`
 }
 

@@ -23,6 +23,8 @@ func newInterceptCmd() *cobra.Command {
 		cookies     []string
 		format      string
 		raw         bool
+		headful     bool
+		sessionSite string
 	)
 
 	cmd := &cobra.Command{
@@ -83,11 +85,25 @@ Examples:
 			spaDomainsFile := filepath.Join(filepath.Dir(cfg.Cache.Dir), "spa_domains.txt")
 			b.SetSPADomainsFile(spaDomainsFile)
 
+			// If --session <site> was passed, fold the cached cookies for
+			// that site into the injection list so the visible browser
+			// opens already-logged-in. Skips the relogin step when
+			// discovering authenticated write flows.
+			if sessionSite != "" {
+				sess, err := loadSessionCookies(cfg, sessionSite)
+				if err != nil {
+					return fmt.Errorf("load session cookies for %s: %w", sessionSite, err)
+				}
+				cookies = append(cookies, sess...)
+				fmt.Fprintf(os.Stderr, "injected %d cookies from ~/.hermai/sessions/%s\n", len(sess), sessionSite)
+			}
+
 			capture, err := b.Capture(ctx, targetURL, browser.CaptureOpts{
 				BrowserPath:   browserPath,
 				Timeout:       captureDuration,
 				WaitAfterLoad: waitAfterLoad,
 				Cookies:       cookies,
+				Headful:       headful,
 			})
 			if err != nil {
 				return fmt.Errorf("browser capture failed: %w", err)
@@ -161,6 +177,31 @@ Examples:
 	cmd.Flags().StringArrayVar(&cookies, "cookie", nil, "Cookies to inject (name=value)")
 	cmd.Flags().BoolVar(&raw, "raw", false, "Include full HAR entries without filtering")
 	cmd.Flags().StringVar(&format, "format", "json", "Output format: json or compact")
+	cmd.Flags().BoolVar(&headful, "headful", false,
+		"Launch a visible browser window so you can perform interactions (save draft, add to cart) while capture runs")
+	cmd.Flags().StringVar(&sessionSite, "session", "",
+		"Inject cookies from ~/.hermai/sessions/<site>/cookies.json so the browser opens already-logged-in")
 
 	return cmd
+}
+
+// loadSessionCookies reads the saved cookies for a site and returns
+// them as name=value pairs ready to hand to CaptureOpts.Cookies.
+func loadSessionCookies(cfg config.Config, site string) ([]string, error) {
+	path := filepath.Join(sessionsDir(cfg), site, "cookies.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cf struct {
+		Cookies map[string]string `json:"cookies"`
+	}
+	if err := json.Unmarshal(b, &cf); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(cf.Cookies))
+	for k, v := range cf.Cookies {
+		out = append(out, k+"="+v)
+	}
+	return out, nil
 }

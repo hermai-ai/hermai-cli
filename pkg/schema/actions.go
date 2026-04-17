@@ -16,7 +16,15 @@ const (
 	ActionTransportHTTPPostForm = "http_post_form"
 )
 
-// Action requirement constants keep runtime behavior explicit.
+// Action requirement constants are the CANONICAL values for the Auth,
+// Session, and JS fields on ActionRequirements. Schemas SHOULD use
+// these strings where possible so the registry can categorize actions
+// consistently, but the fields are intentionally typed as plain
+// strings (not enums) because real-world sites carry requirement
+// semantics that don't fit a small closed set — "user_session" vs
+// "cookie_jar" vs "api_key" vs "oauth2_bearer" all appear in pushed
+// schemas. Validators may warn on unknown values but must not reject
+// them outright.
 const (
 	ActionAuthPublicOnly = "public_only"
 	ActionSessionNone    = "none"

@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hermai-ai/hermai-cli/internal/httpclient"
@@ -145,6 +146,23 @@ func Run(ctx context.Context, req Request) (*Result, error) {
 		_ = saveCookies(req.Schema.Domain, siteDir, cookies)
 	}
 
+	// Auth errors on a schema with bootstrap state are ambiguous: they
+	// can mean the cookies went stale, OR the bootstrap-computed state
+	// did. We can't tell from the response alone, so we invalidate the
+	// state cache. Next call re-bootstraps; if the problem was cookies,
+	// the user will get the same 401 and know to re-import. If it was
+	// stale state, the re-bootstrap fixes it automatically.
+	// Cookies are NOT invalidated here — the user's authenticated
+	// browser session is still the source of truth for those.
+	if (resp.StatusCode == 401 || resp.StatusCode == 403) && req.Schema.Runtime.NeedsBootstrap() {
+		if err := invalidateState(siteDir); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not invalidate stale state for %s: %v\n", req.Schema.Domain, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "cleared %s bootstrap state after HTTP %d — next call will re-bootstrap\n",
+				req.Schema.Domain, resp.StatusCode)
+		}
+	}
+
 	return &Result{
 		Status:     resp.StatusCode,
 		Headers:    resp.Header,
@@ -215,16 +233,68 @@ func resolveCookies(ctx context.Context, domain, siteDir string) (map[string]str
 	return m, nil
 }
 
+// sessionFileMu serializes writes to the per-site session files across
+// goroutines in one process. goja.Runtime isn't concurrency-safe but
+// that's handled separately by creating a fresh runtime per Sign call;
+// here the concern is two goroutines calling Run on the same site
+// racing on cookies.json/state.json. Cross-process concurrency (two
+// `hermai` processes on the same site) is NOT handled by this mutex;
+// users running parallel invocations on the same site should serialize
+// at their level. Documented in architecture/session-storage.md.
+var sessionFileMu sync.Mutex
+
+// saveCookies atomically persists the cookie map to
+// {siteDir}/cookies.json. Atomic rename ensures readers never see a
+// partial file if the writer crashes mid-write. Cookie attributes
+// (Path, Expires, Secure, HttpOnly) are intentionally NOT preserved —
+// we reattach cookies as a single Cookie: name=value; ... header, which
+// doesn't carry attributes, so storing them would just bloat the file.
 func saveCookies(domain, siteDir string, cookies map[string]string) error {
+	sessionFileMu.Lock()
+	defer sessionFileMu.Unlock()
+
 	if err := os.MkdirAll(siteDir, 0700); err != nil {
 		return err
 	}
-	cf := actions.CookieFile{Site: domain, SavedAt: time.Now().UTC(), Cookies: cookies}
+	cf := actions.CookieFile{
+		Site:    domain,
+		SavedAt: time.Now().UTC(),
+		Domain:  domain, // keep in sync with pkg/actions.BootstrapSession
+		Cookies: cookies,
+	}
 	b, err := json.MarshalIndent(cf, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(siteDir, "cookies.json"), b, 0600)
+	return atomicWrite(filepath.Join(siteDir, "cookies.json"), b)
+}
+
+// atomicWrite writes bytes to path via a temp file + rename. A crash
+// mid-write leaves the temp file behind (next call cleans up) but never
+// a truncated cookies.json. Permissions are 0600 regardless of umask.
+func atomicWrite(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	// Ensure 0600 regardless of umask.
+	if err := os.Chmod(tmpPath, 0600); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // StateFile persists bootstrap output.
@@ -277,13 +347,50 @@ func resolveState(ctx context.Context, sch *schema.Schema, siteDir string, boots
 	if ttl <= 0 {
 		ttl = 3600
 	}
-	if err := os.MkdirAll(siteDir, 0700); err == nil {
-		sf := StateFile{Site: sch.Domain, SavedAt: time.Now().UTC(), TTL: ttl, State: state}
-		if b, err := json.MarshalIndent(sf, "", "  "); err == nil {
-			_ = os.WriteFile(path, b, 0600)
-		}
+	if err := saveState(sch.Domain, siteDir, state, ttl); err != nil {
+		// State write failure is non-fatal — the signer can still use
+		// the just-computed state for this call. Next call re-runs
+		// bootstrap, which is fine if slow. Surface the error so
+		// operators notice persistent disk issues.
+		fmt.Fprintf(os.Stderr, "warning: could not persist state for %s: %v\n", sch.Domain, err)
 	}
 	return state, true, nil
+}
+
+// saveState persists a bootstrap-produced state map to
+// {siteDir}/state.json atomically and under the session-file mutex.
+// Called from resolveState after a fresh bootstrap; also called by
+// invalidateStateOnAuthError with an empty state (effectively deleting
+// the cache so the next call triggers a rebootstrap).
+func saveState(domain, siteDir string, state map[string]string, ttl int) error {
+	sessionFileMu.Lock()
+	defer sessionFileMu.Unlock()
+
+	if err := os.MkdirAll(siteDir, 0700); err != nil {
+		return err
+	}
+	sf := StateFile{Site: domain, SavedAt: time.Now().UTC(), TTL: ttl, State: state}
+	b, err := json.MarshalIndent(sf, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(filepath.Join(siteDir, "state.json"), b)
+}
+
+// invalidateState removes the cached state file so the next Run will
+// trigger a fresh bootstrap. Called when a 401/403 suggests the cached
+// bootstrap output (animation_key, msToken, etc.) has gone stale on
+// the server side — X and TikTok can invalidate per-session derived
+// state without notification. Also covers the case where the schema's
+// bootstrap algorithm changed between CLI versions.
+func invalidateState(siteDir string) error {
+	sessionFileMu.Lock()
+	defer sessionFileMu.Unlock()
+	err := os.Remove(filepath.Join(siteDir, "state.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 type doerTransport struct {

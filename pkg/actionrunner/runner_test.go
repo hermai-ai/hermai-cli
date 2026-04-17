@@ -447,6 +447,154 @@ func TestRunner_UnknownActionFails(t *testing.T) {
 	}
 }
 
+func TestRunner_CookieFileCarriesDomain(t *testing.T) {
+	// saveCookies should populate CookieFile.Domain — a consistency
+	// fix so the on-disk shape matches what pkg/actions.BootstrapSession
+	// writes for the same file.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "session", Value: "new-value", Path: "/"})
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	siteDir := filepath.Join(dir, "example.com")
+	writeCookies(t, siteDir, map[string]string{"session": "original"})
+
+	sch := &schema.Schema{
+		Domain: "example.com",
+		Actions: []schema.Action{{Name: "Rotate", Method: "GET", URLTemplate: srv.URL + "/x"}},
+	}
+	_, err := Run(context.Background(), Request{
+		Schema: sch, ActionName: "Rotate", SessionsDir: dir, HTTPClient: srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(siteDir, "cookies.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cf actions.CookieFile
+	if err := json.Unmarshal(b, &cf); err != nil {
+		t.Fatal(err)
+	}
+	if cf.Domain != "example.com" {
+		t.Errorf("CookieFile.Domain = %q, want example.com", cf.Domain)
+	}
+	if cf.Site != "example.com" {
+		t.Errorf("CookieFile.Site = %q, want example.com", cf.Site)
+	}
+}
+
+func TestRunner_AtomicCookieWrite(t *testing.T) {
+	// Simulate a torn write by counting files in the site dir after a
+	// save — there should be exactly one cookies.json, no stray .tmp
+	// files. Atomic rename guarantees this.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "session", Value: "v", Path: "/"})
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	siteDir := filepath.Join(dir, "example.com")
+	writeCookies(t, siteDir, map[string]string{"session": "o"})
+
+	sch := &schema.Schema{
+		Domain:  "example.com",
+		Actions: []schema.Action{{Name: "X", Method: "GET", URLTemplate: srv.URL + "/"}},
+	}
+	_, err := Run(context.Background(), Request{
+		Schema: sch, ActionName: "X", SessionsDir: dir, HTTPClient: srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	entries, err := os.ReadDir(siteDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("leftover temp file after atomic write: %s", e.Name())
+		}
+	}
+}
+
+func TestRunner_AuthErrorInvalidatesState(t *testing.T) {
+	// On a 401 response against a schema with bootstrap, state.json
+	// should be deleted so the next call re-bootstraps. Cookies are
+	// NOT touched (the user's browser session is still authoritative).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		_, _ = io.WriteString(w, `{"error":"auth failed"}`)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	siteDir := filepath.Join(dir, "example.com")
+	writeCookies(t, siteDir, map[string]string{"session": "good"})
+	writeState(t, siteDir, map[string]string{"my_key": "stale-value"}, time.Now().UTC(), 3600)
+
+	sch := &schema.Schema{
+		Domain: "example.com",
+		Runtime: &schema.Runtime{
+			BootstrapJS: `function bootstrap(input) { return { my_key: "fresh" }; }`,
+			SignerJS:    `function sign(input) { return { url: input.url, headers: {} }; }`,
+		},
+		Actions: []schema.Action{{Name: "Ping", Method: "GET", URLTemplate: srv.URL + "/"}},
+	}
+	result, err := Run(context.Background(), Request{
+		Schema: sch, ActionName: "Ping", SessionsDir: dir, HTTPClient: srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != 401 {
+		t.Errorf("status = %d, want 401", result.Status)
+	}
+
+	// state.json should be gone.
+	if _, err := os.Stat(filepath.Join(siteDir, "state.json")); !os.IsNotExist(err) {
+		t.Errorf("state.json should be removed after 401; stat err = %v", err)
+	}
+
+	// cookies.json should still exist — auth errors don't destroy the
+	// user's session cache.
+	if _, err := os.Stat(filepath.Join(siteDir, "cookies.json")); err != nil {
+		t.Errorf("cookies.json should still exist after 401; got %v", err)
+	}
+}
+
+func TestRunner_AuthErrorLeavesStateAloneWithoutBootstrap(t *testing.T) {
+	// If the schema has no bootstrap (no state to invalidate), the 401
+	// path should not try to touch state.json even if one happens to
+	// exist (stale leftover from a previous schema).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	siteDir := filepath.Join(dir, "example.com")
+	writeCookies(t, siteDir, map[string]string{"session": "good"})
+	// No bootstrap, but a state file left from an earlier schema version.
+	writeState(t, siteDir, map[string]string{"legacy": "value"}, time.Now().UTC(), 3600)
+
+	sch := &schema.Schema{
+		Domain:  "example.com",
+		Actions: []schema.Action{{Name: "Ping", Method: "GET", URLTemplate: srv.URL + "/"}},
+	}
+	_, _ = Run(context.Background(), Request{
+		Schema: sch, ActionName: "Ping", SessionsDir: dir, HTTPClient: srv.Client(),
+	})
+	// state.json should still be there.
+	if _, err := os.Stat(filepath.Join(siteDir, "state.json")); err != nil {
+		t.Errorf("state.json should be untouched without bootstrap; got err %v", err)
+	}
+}
+
 func TestRenderTemplate(t *testing.T) {
 	cases := []struct {
 		tpl  string

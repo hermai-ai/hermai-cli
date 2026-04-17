@@ -493,17 +493,37 @@ func renderTemplate(tpl string, args map[string]string) (string, error) {
 	}
 }
 
-// renderJSONTemplate substitutes {{var}} in a JSON body template,
-// JSON-escaping each value so it can't break out of the surrounding
-// string. Crucially, we strip the leading+trailing double quotes the
-// JSON encoder produces — templates write "{{text}}" (with quotes) and
-// we insert the inner bytes. This keeps schema authoring natural:
+// renderJSONTemplate substitutes {{var}} and {{var|filter}} in a JSON
+// body template, JSON-escaping each value so it can't break out of the
+// surrounding string. Default (no filter): json-encode, strip outer
+// quotes, insert. Templates write "{{text}}" (with quotes) and we insert
+// the inner bytes, so authoring is natural:
 //
 //	{"tweet_text":"{{text}}"}
 //
 // with text="hello" becomes {"tweet_text":"hello"}, and text=`hi"bye`
 // becomes {"tweet_text":"hi\"bye"} — the caller's string never escapes
 // its quotes.
+//
+// Supported filters:
+//
+//   - |json        full JSON encoding, quotes included. Use when the
+//                  placeholder sits OUTSIDE a string context:
+//                      {"count": {{count|json}}}   with count="3" → {"count": "3"}
+//                      (caller is responsible for numeric vs string intent).
+//
+//   - |json_array  comma-split the value, JSON-encode each piece as a
+//                  string, join with commas. Use when the placeholder
+//                  sits inside a JSON array literal:
+//                      [{{product_ids|json_array}}]
+//                      --arg product_ids=119586,99811
+//                      → ["119586","99811"]
+//                  Values containing commas must use a different filter;
+//                  this one is for simple id/tag lists.
+//
+// Unknown filters produce a typed error — catches typos like
+// {{text|string}} at render time rather than silently emitting the raw
+// unfiltered value.
 func renderJSONTemplate(tpl string, args map[string]string) (string, error) {
 	out := tpl
 	for {
@@ -515,19 +535,64 @@ func renderJSONTemplate(tpl string, args map[string]string) (string, error) {
 		if j < 0 {
 			return "", fmt.Errorf("unclosed {{ in template")
 		}
-		name := strings.TrimSpace(out[i+2 : i+j])
+		name, filter := parseTemplateVar(out[i+2 : i+j])
 		val := args[name]
+		rendered, err := applyJSONFilter(val, filter, name)
+		if err != nil {
+			return "", err
+		}
+		out = out[:i] + rendered + out[i+j+2:]
+	}
+}
+
+// parseTemplateVar splits a placeholder like "name|filter" into its
+// components. No filter → empty filter string.
+func parseTemplateVar(raw string) (name, filter string) {
+	if pipe := strings.Index(raw, "|"); pipe >= 0 {
+		return strings.TrimSpace(raw[:pipe]), strings.TrimSpace(raw[pipe+1:])
+	}
+	return strings.TrimSpace(raw), ""
+}
+
+// applyJSONFilter renders a single value for renderJSONTemplate, honoring
+// the optional pipe filter. See renderJSONTemplate doc for filter list.
+func applyJSONFilter(val, filter, nameForErr string) (string, error) {
+	switch filter {
+	case "":
 		encoded, err := json.Marshal(val)
 		if err != nil {
-			return "", fmt.Errorf("json-escape %q: %w", name, err)
+			return "", fmt.Errorf("json-escape %q: %w", nameForErr, err)
 		}
-		// json.Marshal(string) yields "quoted" — strip the surrounding
-		// quotes since the template is expected to provide them.
-		inner := string(encoded)
-		if len(inner) >= 2 && inner[0] == '"' && inner[len(inner)-1] == '"' {
-			inner = inner[1 : len(inner)-1]
+		s := string(encoded)
+		if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+			s = s[1 : len(s)-1]
 		}
-		out = out[:i] + inner + out[i+j+2:]
+		return s, nil
+	case "json":
+		encoded, err := json.Marshal(val)
+		if err != nil {
+			return "", fmt.Errorf("json-encode %q: %w", nameForErr, err)
+		}
+		return string(encoded), nil
+	case "json_array":
+		// Empty value → empty array body (the caller's brackets in the
+		// template make it `[]`).
+		if strings.TrimSpace(val) == "" {
+			return "", nil
+		}
+		parts := strings.Split(val, ",")
+		encoded := make([]string, len(parts))
+		for idx, p := range parts {
+			b, err := json.Marshal(strings.TrimSpace(p))
+			if err != nil {
+				return "", fmt.Errorf("json_array: marshal %q[%d]: %w", nameForErr, idx, err)
+			}
+			encoded[idx] = string(b)
+		}
+		return strings.Join(encoded, ","), nil
+	default:
+		return "", fmt.Errorf("unknown template filter %q on {{%s|%s}} — supported: json, json_array",
+			filter, nameForErr, filter)
 	}
 }
 

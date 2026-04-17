@@ -618,3 +618,92 @@ func TestRenderTemplate(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderJSONTemplate_NoFilter(t *testing.T) {
+	cases := []struct {
+		tpl, arg, want string
+	}{
+		{`"text":"{{t}}"`, "hello", `"text":"hello"`},
+		{`"text":"{{t}}"`, `hi "friend"`, `"text":"hi \"friend\""`},
+		{`"text":"{{t}}"`, "line1\nline2", `"text":"line1\nline2"`},
+	}
+	for _, c := range cases {
+		got, err := renderJSONTemplate(c.tpl, map[string]string{"t": c.arg})
+		if err != nil {
+			t.Errorf("arg=%q: %v", c.arg, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("arg=%q got %q, want %q", c.arg, got, c.want)
+		}
+	}
+}
+
+func TestRenderJSONTemplate_JSONFilter(t *testing.T) {
+	// |json keeps the outer quotes — use when the placeholder is NOT
+	// already wrapped in quotes in the template.
+	got, err := renderJSONTemplate(`{"text": {{t|json}}}`, map[string]string{"t": "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != `{"text": "hello"}` {
+		t.Errorf("got %q, want {\"text\": \"hello\"}", got)
+	}
+}
+
+func TestRenderJSONTemplate_JSONArrayFilter(t *testing.T) {
+	cases := []struct {
+		arg, want string
+	}{
+		// Typical comma-separated list
+		{"119586,99811", `"119586","99811"`},
+		// Whitespace around commas is trimmed
+		{"a, b, c", `"a","b","c"`},
+		// Single value → single-element array
+		{"solo", `"solo"`},
+		// Values with quotes get JSON-escaped
+		{`hi"bye,plain`, `"hi\"bye","plain"`},
+		// Empty value → empty output (caller's [] makes it a literal empty array)
+		{"", ``},
+		{"   ", ``},
+	}
+	for _, c := range cases {
+		got, err := renderJSONTemplate(`[{{ids|json_array}}]`, map[string]string{"ids": c.arg})
+		if err != nil {
+			t.Errorf("arg=%q: %v", c.arg, err)
+			continue
+		}
+		expected := "[" + c.want + "]"
+		if got != expected {
+			t.Errorf("arg=%q got %q, want %q", c.arg, got, expected)
+		}
+	}
+}
+
+func TestRenderJSONTemplate_UnknownFilter(t *testing.T) {
+	_, err := renderJSONTemplate(`{{x|bogus}}`, map[string]string{"x": "v"})
+	if err == nil {
+		t.Fatal("expected error on unknown filter")
+	}
+	if !strings.Contains(err.Error(), "unknown template filter") {
+		t.Errorf("error text should mention 'unknown template filter', got: %v", err)
+	}
+}
+
+func TestRenderJSONTemplate_MultiFilterInOneTemplate(t *testing.T) {
+	// Realistic shape: a GraphQL variables body that mixes a scalar
+	// string arg with an array of ids.
+	tpl := `{"variables":{"query":"{{q}}","ids":[{{ids|json_array}}],"count":{{n|json}}}}`
+	got, err := renderJSONTemplate(tpl, map[string]string{
+		"q":   "matte lipstick",
+		"ids": "119586,99811,40112",
+		"n":   "3",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"variables":{"query":"matte lipstick","ids":["119586","99811","40112"],"count":"3"}}`
+	if got != want {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}

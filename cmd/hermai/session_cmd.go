@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hermai-ai/hermai-cli/pkg/actions"
+	"github.com/hermai-ai/hermai-cli/pkg/browsercookies"
 	"github.com/hermai-ai/hermai-cli/pkg/config"
 	"github.com/spf13/cobra"
 )
@@ -48,8 +49,115 @@ waits for the required cookies, and saves them to ~/.hermai/sessions/.
 	}
 
 	cmd.AddCommand(newSessionBootstrapCmd())
+	cmd.AddCommand(newSessionImportCmd())
 	cmd.AddCommand(newSessionStatusCmd())
 	cmd.AddCommand(newSessionListCmd())
+
+	return cmd
+}
+
+func newSessionImportCmd() *cobra.Command {
+	var (
+		browsersFlag []string
+		timeout      time.Duration
+		dryRun       bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "import <site>",
+		Short: "Import cookies for a site from your existing browser session",
+		Long: `Reads cookies for <site> from the browsers installed on this machine
+(Chrome, Firefox, Safari, Edge, Brave, Chromium, Opera, Vivaldi) and writes
+them to ~/.hermai/sessions/<site>/cookies.json — the same format as
+'hermai session bootstrap'.
+
+Use this when you're already signed in to a site in your everyday browser
+and want Hermai to replay that session on your behalf without asking you
+to log in again.
+
+Privacy: only cookies scoped to <site> are ever read. The first run may
+trigger an OS-level prompt (macOS Keychain / Windows DPAPI / Linux
+libsecret) asking you to authorize Hermai to read the browser's cookie
+store; Hermai cannot access your cookies without your explicit OS consent.
+
+Examples:
+  hermai session import x.com
+  hermai session import airbnb.com --browsers firefox,chrome
+  hermai session import x.com --dry-run        # check if cookies exist`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			site := strings.ToLower(strings.TrimSpace(args[0]))
+			if site == "" {
+				return fmt.Errorf("site is required")
+			}
+
+			ctx, cancel := signalContext(timeout)
+			defer cancel()
+
+			src := &browsercookies.Source{BrowserPreference: browsersFlag}
+			start := time.Now()
+			cookies, err := src.GetCookies(ctx, site)
+			if err != nil {
+				return fmt.Errorf("read browser cookies: %w", err)
+			}
+
+			if len(cookies) == 0 {
+				fmt.Fprintf(os.Stderr, "no cookies found for %s in any installed browser.\n", site)
+				fmt.Fprintf(os.Stderr, "make sure you're signed in to %s in Chrome/Firefox/Safari/Edge, then retry.\n", site)
+				fmt.Fprintf(os.Stderr, "if you don't have the site open in a browser, run: hermai session bootstrap %s\n", site)
+				os.Exit(1)
+			}
+
+			fmt.Fprintf(os.Stderr, "read %d cookies for %s from local browser (%v)\n",
+				len(cookies), site, time.Since(start).Round(time.Millisecond))
+
+			if dryRun {
+				fmt.Fprintf(os.Stderr, "--dry-run: cookie names (not values):\n")
+				for _, c := range cookies {
+					fmt.Fprintf(os.Stderr, "  %s  (domain=%s path=%s)\n", c.Name, c.Domain, c.Path)
+				}
+				return nil
+			}
+
+			// Normalize into the same CookieFile shape as 'session bootstrap'
+			// so downstream commands (replay, execute) treat it the same.
+			domain, _ := browsercookies.NormalizeDomain(site)
+			cookieMap := make(map[string]string, len(cookies))
+			for _, c := range cookies {
+				cookieMap[c.Name] = c.Value
+			}
+
+			storageDir := sessionsDir(config.Load())
+			siteDir := filepath.Join(storageDir, site)
+			if err := os.MkdirAll(siteDir, 0700); err != nil {
+				return fmt.Errorf("mkdir %s: %w", siteDir, err)
+			}
+			storagePath := filepath.Join(siteDir, "cookies.json")
+
+			file := actions.CookieFile{
+				Site:    site,
+				SavedAt: time.Now().UTC(),
+				Domain:  domain,
+				Cookies: cookieMap,
+			}
+			body, err := json.MarshalIndent(file, "", "  ")
+			if err != nil {
+				return fmt.Errorf("marshal cookie file: %w", err)
+			}
+			if err := os.WriteFile(storagePath, body, 0600); err != nil {
+				return fmt.Errorf("write %s: %w", storagePath, err)
+			}
+			fmt.Fprintf(os.Stderr, "saved %s\n", storagePath)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringSliceVar(&browsersFlag, "browsers", nil,
+		"Restrict to specific browsers (comma-separated: chrome,firefox,safari,edge,brave,chromium,opera,vivaldi)")
+	cmd.Flags().DurationVar(&timeout, "timeout", 30*time.Second,
+		"Maximum time to spend scanning browser cookie stores")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
+		"Print the cookie names that would be imported, without saving values to disk")
 
 	return cmd
 }

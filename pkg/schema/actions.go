@@ -35,7 +35,15 @@ const (
 
 // Action describes a browserless, agent-callable website interaction.
 type Action struct {
-	Name         string             `json:"name"`
+	Name string `json:"name"`
+	// Purpose is the user-voice one-liner the registry projects onto
+	// the public card. Names what the action lets a caller do in a
+	// sentence anyone (not just an engineer) could understand. Missing
+	// purpose → action doesn't appear on the catalog card (by design —
+	// the validator refuses to fabricate one from the paywalled
+	// description). Example: "Save a tweet to the authenticated user's
+	// drafts. Private — only visible to the signed-in account."
+	Purpose      string             `json:"purpose,omitempty"`
 	Description  string             `json:"description,omitempty"`
 	Kind         string             `json:"kind"`
 	Transport    string             `json:"transport"`

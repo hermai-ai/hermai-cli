@@ -22,8 +22,14 @@ const (
 
 // Schema represents a discovered API schema for a domain's URL pattern.
 type Schema struct {
-	ID              string           `json:"id"`
-	Domain          string           `json:"domain"`
+	ID string `json:"id"`
+	// Site is the canonical domain key the registry validator reads.
+	// Set this on every new schema. Domain is retained for backward
+	// compatibility with pre-2026-04 schemas that used it as the site
+	// key, but any new code should populate Site. The hermai-api
+	// validator accepts either and normalizes to Site.
+	Site            string           `json:"site,omitempty"`
+	Domain          string           `json:"domain,omitempty"`
 	URLPattern      string           `json:"url_pattern"`
 	SchemaType      string           `json:"schema_type,omitempty"` // "api" or "css_selector"
 	Coverage        string           `json:"coverage,omitempty"`    // partial or complete

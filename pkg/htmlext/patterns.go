@@ -167,6 +167,7 @@ func extractEmbeddedFromDoc(doc *html.Node) map[string]any {
 
 func processScriptNode(n *html.Node, result map[string]any) {
 	id := attr(n, "id")
+	typ := attr(n, "type")
 	text := scriptText(n)
 
 	if id != "" {
@@ -181,6 +182,26 @@ func processScriptNode(n *html.Node, result map[string]any) {
 				result[p.Name] = data
 			}
 			return
+		}
+		// Generic fallback: a <script type="application/json" id="X">
+		// tag with meaningful JSON content but an id we don't have in
+		// our named-pattern list. Many micro-frontend platforms ship
+		// SSR data this way (Estée Lauder's `page_data`, Shopify Hydrogen
+		// tags, custom React-app dehydration blobs). Including them makes
+		// extract a useful first pass on any SPA whose convention
+		// hasn't been promoted to a first-class entry.
+		//
+		// Rules: id must be non-empty, type must be application/json
+		// (or the close cousin application/ld+json), content must be
+		// at least ~100 chars to filter out micro config stubs, and
+		// the content must parse as JSON. The key is the raw id so
+		// `hermai extract --pattern page_data` just works.
+		if isJSONScriptType(typ) && len(text) >= 100 {
+			if _, found := result[id]; !found {
+				if data := parseJSONText(text); data != nil {
+					result[id] = data
+				}
+			}
 		}
 	}
 
@@ -203,6 +224,20 @@ func processScriptNode(n *html.Node, result map[string]any) {
 		if data != nil {
 			result[p.Name] = data
 		}
+	}
+}
+
+// isJSONScriptType reports whether a <script> element's type attribute
+// indicates a JSON payload. Accepts `application/json` exactly and the
+// `application/ld+json` close cousin that SEO structured data uses —
+// schemas sometimes need both (e.g., a product page may carry a ld+json
+// summary next to the SSR blob we actually want).
+func isJSONScriptType(typ string) bool {
+	switch strings.ToLower(strings.TrimSpace(typ)) {
+	case "application/json", "application/ld+json":
+		return true
+	default:
+		return false
 	}
 }
 

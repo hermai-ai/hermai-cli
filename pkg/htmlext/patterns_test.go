@@ -282,3 +282,87 @@ func TestListPatterns(t *testing.T) {
 		}
 	}
 }
+
+// --- generic <script type="application/json" id="X"> fallback --------------
+
+func TestExtractEmbeddedScripts_GenericIDFallback(t *testing.T) {
+	// An SSR-rendered micro-frontend (Estée Lauder's ELC platform uses
+	// id="page_data", Shopify Hydrogen sometimes uses custom ids) ships
+	// its hydration blob inside a <script> tag with a non-standard id.
+	// The extractor should surface any such tag keyed by its raw id.
+	html := `<html><body>
+		<script type="application/json" id="page_data">` +
+		`{"consolidated-categories":{"12345":{"name":"Lipstick"}},"consolidated-products":{"PROD1":{"price":25.00,"shades":20}},"page_config":{"storefront":"mc-us-en-ecommv1"}}` +
+		`</script>
+	</body></html>`
+
+	result := ExtractEmbeddedScripts(html)
+	got, ok := result["page_data"]
+	if !ok {
+		t.Fatalf("expected page_data key in result; got %v", result)
+	}
+	m, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("page_data should be an object, got %T", got)
+	}
+	if _, ok := m["consolidated-products"]; !ok {
+		t.Error("page_data is missing expected keys")
+	}
+}
+
+func TestExtractEmbeddedScripts_NamedPatternBeatsGeneric(t *testing.T) {
+	// __NEXT_DATA__ must still surface under its named key, not under a
+	// raw "script:__NEXT_DATA__" bucket, even though it matches both
+	// the named and generic rules.
+	html := `<html><body>
+		<script type="application/json" id="__NEXT_DATA__">{"props":{"pageProps":{"title":"Hello"}}}</script>
+	</body></html>`
+	result := ExtractEmbeddedScripts(html)
+	if _, ok := result["__NEXT_DATA__"]; !ok {
+		t.Error("__NEXT_DATA__ missing from result")
+	}
+	// No duplicate entry under some generic key.
+	if len(result) != 1 {
+		t.Errorf("expected 1 key, got %d: %v", len(result), keys(result))
+	}
+}
+
+func TestExtractEmbeddedScripts_GenericFallbackIgnoresShortOrIDless(t *testing.T) {
+	// Very short JSON bodies, JSON without an id, and non-JSON types
+	// should all be skipped so the extractor doesn't surface every
+	// micro config stub.
+	html := `<html><body>
+		<script type="application/json" id="tiny">{"k":1}</script>                  <!-- too short -->
+		<script type="application/json">{"a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"long_enough":"yes, definitely more than one hundred chars of padding here to cross the threshold set by the extractor"}</script>   <!-- no id -->
+		<script type="text/javascript" id="plainJS">var x = {"a": 1};</script>   <!-- wrong type -->
+	</body></html>`
+	result := ExtractEmbeddedScripts(html)
+	if len(result) != 0 {
+		t.Errorf("expected nothing, got %v", keys(result))
+	}
+}
+
+func TestExtractEmbeddedScripts_MultipleGenericIDsCoexist(t *testing.T) {
+	html := `<html><body>
+		<script type="application/json" id="page_data">` +
+		`{"widely":"used","pattern":"for micro frontends","more":"padding here","yet":"more","one":1,"two":2,"three":3,"four":4,"five":5,"six":6}</script>
+		<script type="application/json" id="pdp_config">` +
+		`{"currency":"USD","locale":"en-US","shipping_threshold":45,"promo_banners":["free_ship","sale_14_off"],"more":"stuff here long enough for threshold"}</script>
+	</body></html>`
+	result := ExtractEmbeddedScripts(html)
+	for _, want := range []string{"page_data", "pdp_config"} {
+		if _, ok := result[want]; !ok {
+			t.Errorf("missing %q in result: got %v", want, keys(result))
+		}
+	}
+}
+
+// keys is a tiny helper for error messages so failing tests show what
+// WAS found when the expected key is missing.
+func keys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

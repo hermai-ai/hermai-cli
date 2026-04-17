@@ -23,6 +23,9 @@ func newInterceptCmd() *cobra.Command {
 		cookies     []string
 		format      string
 		raw         bool
+		ndjson      bool
+		headful     bool
+		sessionSite string
 	)
 
 	cmd := &cobra.Command{
@@ -83,11 +86,25 @@ Examples:
 			spaDomainsFile := filepath.Join(filepath.Dir(cfg.Cache.Dir), "spa_domains.txt")
 			b.SetSPADomainsFile(spaDomainsFile)
 
+			// If --session <site> was passed, fold the cached cookies for
+			// that site into the injection list so the visible browser
+			// opens already-logged-in. Skips the relogin step when
+			// discovering authenticated write flows.
+			if sessionSite != "" {
+				sess, err := loadSessionCookies(cfg, sessionSite)
+				if err != nil {
+					return fmt.Errorf("load session cookies for %s: %w", sessionSite, err)
+				}
+				cookies = append(cookies, sess...)
+				fmt.Fprintf(os.Stderr, "injected %d cookies from ~/.hermai/sessions/%s\n", len(sess), sessionSite)
+			}
+
 			capture, err := b.Capture(ctx, targetURL, browser.CaptureOpts{
 				BrowserPath:   browserPath,
 				Timeout:       captureDuration,
 				WaitAfterLoad: waitAfterLoad,
 				Cookies:       cookies,
+				Headful:       headful,
 			})
 			if err != nil {
 				return fmt.Errorf("browser capture failed: %w", err)
@@ -98,6 +115,18 @@ Examples:
 			}
 
 			if raw {
+				if ndjson {
+					// One HAR entry per line — jq/grep-friendly without
+					// a whole-file JSON parse. Handy when the capture is
+					// multi-MB (dozens of XHRs, response bodies inlined).
+					enc := json.NewEncoder(os.Stdout)
+					for i := range capture.HAR.Entries {
+						if err := enc.Encode(capture.HAR.Entries[i]); err != nil {
+							return err
+						}
+					}
+					return nil
+				}
 				out, err := json.Marshal(capture.HAR.Entries)
 				if err != nil {
 					return err
@@ -105,6 +134,37 @@ Examples:
 				out = append(out, '\n')
 				_, err = os.Stdout.Write(out)
 				return err
+			}
+
+			// --ndjson without --raw: emit one FILTERED API entry per line.
+			// Matches the common "capture, then grep the interesting XHRs"
+			// workflow without forcing users to post-process a wrapped JSON
+			// array.
+			if ndjson {
+				filtered := browser.FilterHAR(capture.HAR)
+				enc := json.NewEncoder(os.Stdout)
+				for i := range filtered.Entries {
+					e := filtered.Entries[i]
+					line := map[string]any{
+						"method":  e.Request.Method,
+						"url":     e.Request.URL,
+						"status":  e.Response.Status,
+						"content_type": e.Response.ContentType,
+					}
+					if len(e.Request.Headers) > 0 {
+						line["request_headers"] = e.Request.Headers
+					}
+					if e.Request.Body != "" {
+						line["request_body"] = e.Request.Body
+					}
+					if e.Response.Body != "" {
+						line["response_body"] = e.Response.Body
+					}
+					if err := enc.Encode(line); err != nil {
+						return err
+					}
+				}
+				return nil
 			}
 
 			filtered := browser.FilterHAR(capture.HAR)
@@ -160,7 +220,34 @@ Examples:
 	cmd.Flags().StringVar(&wait, "wait", "", "Extra wait time after page load (e.g. 5s)")
 	cmd.Flags().StringArrayVar(&cookies, "cookie", nil, "Cookies to inject (name=value)")
 	cmd.Flags().BoolVar(&raw, "raw", false, "Include full HAR entries without filtering")
+	cmd.Flags().BoolVar(&ndjson, "ndjson", false,
+		"Emit one JSON entry per line (newline-delimited JSON) — jq/grep/awk-friendly. Combine with --raw for full entries or alone for filtered API entries.")
 	cmd.Flags().StringVar(&format, "format", "json", "Output format: json or compact")
+	cmd.Flags().BoolVar(&headful, "headful", false,
+		"Launch a visible browser window so you can perform interactions (save draft, add to cart) while capture runs")
+	cmd.Flags().StringVar(&sessionSite, "session", "",
+		"Inject cookies from ~/.hermai/sessions/<site>/cookies.json so the browser opens already-logged-in")
 
 	return cmd
+}
+
+// loadSessionCookies reads the saved cookies for a site and returns
+// them as name=value pairs ready to hand to CaptureOpts.Cookies.
+func loadSessionCookies(cfg config.Config, site string) ([]string, error) {
+	path := filepath.Join(sessionsDir(cfg), site, "cookies.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cf struct {
+		Cookies map[string]string `json:"cookies"`
+	}
+	if err := json.Unmarshal(b, &cf); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(cf.Cookies))
+	for k, v := range cf.Cookies {
+		out = append(out, k+"="+v)
+	}
+	return out, nil
 }

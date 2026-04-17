@@ -151,9 +151,16 @@ func connectCDP(cdpURL string) (*RodBrowser, error) {
 // Proxy auth credentials are stored and handled via CDP Fetch.AuthRequired
 // during capture.
 func launchChromium(browserPath, proxyURL string) (*RodBrowser, error) {
+	return launchChromiumOpts(browserPath, proxyURL, true)
+}
+
+// launchChromiumOpts is like launchChromium but exposes the headless
+// switch. Used by capture flows that need a visible window for operator
+// interaction (schema discovery of authenticated write endpoints).
+func launchChromiumOpts(browserPath, proxyURL string, headless bool) (*RodBrowser, error) {
 	proxy := parseProxy(proxyURL)
 
-	l := launcher.New().Headless(true).Leakless(false)
+	l := launcher.New().Headless(headless).Leakless(false)
 	if browserPath != "" {
 		l = l.Bin(browserPath)
 	}
@@ -201,6 +208,18 @@ func (rb *RodBrowser) SetSPADomainsFile(path string) {
 // JavaScript execution. This ensures SPAs (React, Next.js, Vue) still work.
 func (rb *RodBrowser) Capture(ctx context.Context, targetURL string, opts CaptureOpts) (*CaptureResult, error) {
 	domain := domainFromURL(targetURL)
+
+	// Headful mode forces a visible Chromium window — Lightpanda can't
+	// do that, and headless Chromium has no window for the operator to
+	// interact with. Skip both fast paths and spawn a visible Chromium.
+	if opts.Headful {
+		chromium, err := launchChromiumOpts(rb.browserPath, opts.ProxyURL, false)
+		if err != nil {
+			return nil, err
+		}
+		defer chromium.Close()
+		return chromium.captureOnce(ctx, targetURL, opts)
+	}
 
 	// Fast path: if this domain previously needed Chromium, skip Lightpanda
 	// entirely. Saves 5-10s of wasted Lightpanda time on known SPA sites.

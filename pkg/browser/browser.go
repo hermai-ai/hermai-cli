@@ -18,6 +18,11 @@ type CaptureOpts struct {
 	Timeout       time.Duration
 	WaitAfterLoad time.Duration
 	Cookies       []string // name=value pairs to inject before navigation
+	// Headful launches a visible Chrome window so the operator can
+	// perform real-user interactions (save draft, add to cart, etc.)
+	// while the capture runs. Default false — headless for CI/automated
+	// discovery.
+	Headful bool
 }
 
 // CaptureResult holds the output of a browser capture session.

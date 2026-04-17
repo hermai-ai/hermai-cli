@@ -22,8 +22,14 @@ const (
 
 // Schema represents a discovered API schema for a domain's URL pattern.
 type Schema struct {
-	ID              string           `json:"id"`
-	Domain          string           `json:"domain"`
+	ID string `json:"id"`
+	// Site is the canonical domain key the registry validator reads.
+	// Set this on every new schema. Domain is retained for backward
+	// compatibility with pre-2026-04 schemas that used it as the site
+	// key, but any new code should populate Site. The hermai-api
+	// validator accepts either and normalizes to Site.
+	Site            string           `json:"site,omitempty"`
+	Domain          string           `json:"domain,omitempty"`
 	URLPattern      string           `json:"url_pattern"`
 	SchemaType      string           `json:"schema_type,omitempty"` // "api" or "css_selector"
 	Coverage        string           `json:"coverage,omitempty"`    // partial or complete
@@ -34,6 +40,7 @@ type Schema struct {
 	Actions         []Action         `json:"actions,omitempty"`
 	ExtractionRules *ExtractionRules `json:"extraction_rules,omitempty"`
 	Session         *SessionConfig   `json:"session,omitempty"`
+	Runtime         *Runtime         `json:"runtime,omitempty"`
 	RequiresStealth bool             `json:"requires_stealth,omitempty"`
 }
 
@@ -78,7 +85,15 @@ type SessionConfig struct {
 
 // Endpoint represents a single API endpoint within a schema.
 type Endpoint struct {
-	Name            string            `json:"name"`
+	Name string `json:"name"`
+	// Purpose is the user-voice one-liner that surfaces on the public
+	// catalog card. Describes what data a caller can get from this
+	// endpoint in a sentence anyone (not just an engineer) understands.
+	// The technical how-to — selectors, parse paths, script-tag ids —
+	// goes in Description, which stays paywalled inside the full
+	// package. Missing purpose → endpoint is omitted from the public
+	// card (the validator will not invent one from Description).
+	Purpose         string            `json:"purpose,omitempty"`
 	Description     string            `json:"description,omitempty"`
 	Method          string            `json:"method"`
 	URLTemplate     string            `json:"url_template"`

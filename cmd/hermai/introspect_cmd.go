@@ -24,6 +24,7 @@ func newIntrospectCmd() *cobra.Command {
 		insecure bool
 		format   string
 		full     bool
+		headers  []string
 	)
 
 	cmd := &cobra.Command{
@@ -65,6 +66,16 @@ Examples:
 			probe.SetBrowserHeaders(req)
 			// GraphQL endpoints require JSON accept, not the HTML accept from SetBrowserHeaders
 			req.Header.Set("Accept", "application/json")
+			// Custom headers via --header name=value. Applied last so
+			// they override defaults (notably when a GraphQL endpoint
+			// wants a site-specific Accept or custom auth shape).
+			for _, h := range headers {
+				k, v, ok := strings.Cut(h, "=")
+				if !ok || strings.TrimSpace(k) == "" {
+					return fmt.Errorf("--header must be key=value, got %q", h)
+				}
+				req.Header.Set(strings.TrimSpace(k), v)
+			}
 
 			resp, err := client.Do(req)
 			if err != nil {
@@ -145,6 +156,8 @@ Examples:
 	cmd.Flags().BoolVarP(&insecure, "insecure", "k", false, "Skip TLS verification")
 	cmd.Flags().BoolVar(&full, "full", false, "Full introspection with args, descriptions, and built-in types")
 	cmd.Flags().StringVar(&format, "format", "json", "Output format: json or compact")
+	cmd.Flags().StringArrayVar(&headers, "header", nil,
+		"Custom header to send, repeatable: --header name=value. Use for auth-gated GraphQL (Stardust, Shopify Storefront, etc.)")
 
 	return cmd
 }

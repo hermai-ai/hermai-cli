@@ -114,6 +114,48 @@ func TestRunner_SimpleAction_NoRuntime(t *testing.T) {
 	}
 }
 
+func TestRunner_SignerAugmentedURL(t *testing.T) {
+	// A signer that returns {url: augmented, headers: {}} must have its
+	// URL written back to the outgoing request — otherwise sites that
+	// sign via query parameters (TikTok's X-Bogus, Xiaohongshu's X-s/X-t)
+	// silently fail. The signer appends a query param; we assert the
+	// server sees it.
+	var seenQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenQuery = r.URL.RawQuery
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	writeCookies(t, filepath.Join(dir, "example.com"), map[string]string{"session": "abc"})
+
+	sch := &schema.Schema{
+		Domain: "example.com",
+		Runtime: &schema.Runtime{
+			// Return input.url + "&X-Bogus=bogus-value". No headers touched.
+			SignerJS: `
+				function sign(input) {
+					var sep = input.url.indexOf("?") >= 0 ? "&" : "?";
+					return { url: input.url + sep + "X-Bogus=bogus-value", headers: {} };
+				}
+			`,
+		},
+		Actions: []schema.Action{
+			{Name: "Ping", Method: "GET", URLTemplate: srv.URL + "/ping"},
+		},
+	}
+	_, err := Run(context.Background(), Request{
+		Schema: sch, ActionName: "Ping", SessionsDir: dir, HTTPClient: srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(seenQuery, "X-Bogus=bogus-value") {
+		t.Errorf("server did not see X-Bogus query param; saw: %q", seenQuery)
+	}
+}
+
 func TestRunner_SignerOnly(t *testing.T) {
 	var seenTxID string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

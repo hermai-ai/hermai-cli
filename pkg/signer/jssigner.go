@@ -202,16 +202,22 @@ func injectHermaiGlobal(rt *goja.Runtime) {
 	})
 
 	_ = h.Set("base64Decode", func(input string) (string, error) {
-		b, err := base64.StdEncoding.DecodeString(input)
-		if err != nil {
-			// Try URL-safe as a fallback — signers often capture from
-			// browser code that normalized to URL-safe encoding.
-			b, err = base64.RawURLEncoding.DecodeString(input)
-			if err != nil {
-				return "", err
+		// Try all four combinations of alphabet (standard vs URL-safe)
+		// and padding (with vs without) in order of likelihood. Signer
+		// authors capture values from browser code that uses any of
+		// these conventions; a single unhelpful "invalid padding" error
+		// makes schemas flaky for reasons unrelated to the algorithm.
+		for _, enc := range []*base64.Encoding{
+			base64.StdEncoding,
+			base64.URLEncoding,
+			base64.RawStdEncoding,
+			base64.RawURLEncoding,
+		} {
+			if b, err := enc.DecodeString(input); err == nil {
+				return string(b), nil
 			}
 		}
-		return string(b), nil
+		return "", fmt.Errorf("base64Decode: input is not valid base64 in any standard alphabet/padding combination")
 	})
 
 	_ = h.Set("hex", func(input string) string {

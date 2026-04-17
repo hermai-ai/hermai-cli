@@ -316,6 +316,57 @@ func TestJSSigner_HexRoundTrip(t *testing.T) {
 	}
 }
 
+func TestJSSigner_Base64DecodeAllAlphabets(t *testing.T) {
+	// Decode the same 3-byte value via all four alphabet/padding combos
+	// and assert each succeeds. "hi?" differs across alphabets because
+	// it produces "/" (standard) vs "_" (URL-safe); "fo" differs across
+	// padding conventions (2 bytes → 4 chars with "=" or 3 chars without).
+	src := `
+		function sign(input) {
+			return { headers: {
+				"std-padded":  hermai.base64Decode("aGk/"),  // std alphabet, no padding needed
+				"url-padded":  hermai.base64Decode("aGk_"),  // URL-safe alphabet
+				"std-padded2": hermai.base64Decode("Zm8="),  // std alphabet, 2-byte with = padding
+				"std-nopad":   hermai.base64Decode("Zm8")    // std alphabet, 2-byte no padding
+			}};
+		}
+	`
+	s, _ := NewJSSigner(src)
+	out, err := s.Sign(context.Background(), Input{})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if got := out.Headers["std-padded"]; got != "hi?" {
+		t.Errorf("std-padded = %q, want \"hi?\"", got)
+	}
+	if got := out.Headers["url-padded"]; got != "hi?" {
+		t.Errorf("url-padded = %q, want \"hi?\"", got)
+	}
+	if got := out.Headers["std-padded2"]; got != "fo" {
+		t.Errorf("std-padded2 = %q, want \"fo\"", got)
+	}
+	if got := out.Headers["std-nopad"]; got != "fo" {
+		t.Errorf("std-nopad = %q, want \"fo\"", got)
+	}
+}
+
+func TestJSSigner_Base64DecodeInvalidInput(t *testing.T) {
+	src := `
+		function sign(input) {
+			try { return { headers: { "v": hermai.base64Decode("!!!not-base64!!!") } }; }
+			catch (e) { return { headers: { "err": String(e) } }; }
+		}
+	`
+	s, _ := NewJSSigner(src)
+	out, err := s.Sign(context.Background(), Input{})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if !strings.Contains(out.Headers["err"], "base64") {
+		t.Errorf("error should mention base64, got: %q", out.Headers["err"])
+	}
+}
+
 func TestJSSigner_Base64(t *testing.T) {
 	src := `
 		function sign(input) {

@@ -45,10 +45,18 @@ type Input struct {
 	NowMS int64 `json:"now_ms"`
 }
 
-// Output is what a signer returns. URL may be the input URL with extra
-// query parameters appended (TikTok's X-Bogus, _signature). Headers are
-// merged onto the outgoing request, overriding any existing values with
-// the same name.
+// Output is what a signer returns.
+//
+// URL is the (possibly-augmented) request URL. Signers that need to add
+// query parameters — TikTok's X-Bogus, Xiaohongshu's X-s/X-t — return
+// the input URL with the params appended. An empty string means "don't
+// touch the request URL." The runner writes non-empty URL back onto the
+// outgoing http.Request.
+//
+// Headers are merged onto the outgoing request, overriding any existing
+// values with the same name. Headers is never nil on a successful call
+// (an empty map is returned when the signer's JS supplied no headers or
+// returned {} ), so callers can iterate without a nil-check.
 type Output struct {
 	URL     string            `json:"url"`
 	Headers map[string]string `json:"headers"`

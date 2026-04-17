@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -454,6 +455,18 @@ func sign(ctx context.Context, sch *schema.Schema, req *http.Request, cookies, s
 	}
 	for k, v := range out.Headers {
 		req.Header.Set(k, v)
+	}
+	// Signers may return an augmented URL — TikTok's signer appends
+	// X-Bogus / _signature as query params, Xiaohongshu appends X-s/X-t.
+	// If the signer returned a URL that differs from the input, swap it
+	// in. Empty out.URL means "no change."
+	if out.URL != "" && out.URL != req.URL.String() {
+		parsed, err := url.Parse(out.URL)
+		if err != nil {
+			return fmt.Errorf("signer returned unparseable URL %q: %w", out.URL, err)
+		}
+		req.URL = parsed
+		req.Host = parsed.Host
 	}
 	return nil
 }

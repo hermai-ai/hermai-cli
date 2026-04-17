@@ -322,10 +322,23 @@ func (b *JSBootstrap) injectBootstrapGlobals(rt *goja.Runtime, ctx context.Conte
 }
 
 // nodeToJS serializes an html.Node to a plain map that JS can walk.
-// Children are flattened to element-only slices — text nodes are
-// concatenated into `text` on the parent. This matches what bootstraps
-// typically want (structure + attributes), without handing over the
-// full html.Node Go type to the JS side.
+// Two kinds of text are exposed so schema authors can pick the right
+// one without surprise:
+//
+//   - `text`        — concatenation of the DIRECT-child text nodes only.
+//                     Matches "innerText of just this element, nothing
+//                     inherited from descendants." Good for tags like
+//                     <meta content=".."> where attrs are the real data
+//                     and text happens to be empty.
+//   - `textContent` — DOM-style textContent: every descendant text node
+//                     joined. Matches what `.textContent` on a live DOM
+//                     would return. Good for tags like <title>X</title>
+//                     or <p>Hello <b>world</b></p> where descendants
+//                     carry meaningful characters.
+//
+// `children` holds only ElementNode children. Text nodes never appear
+// there — schema authors iterate `children` for structure and read
+// `text` / `textContent` for strings.
 func nodeToJS(n *html.Node) map[string]any {
 	if n == nil {
 		return nil
@@ -334,22 +347,46 @@ func nodeToJS(n *html.Node) map[string]any {
 	for _, a := range n.Attr {
 		attrs[a.Key] = a.Val
 	}
-	var text strings.Builder
+	var directText strings.Builder
 	var children []any
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		switch c.Type {
 		case html.TextNode:
-			text.WriteString(c.Data)
+			directText.WriteString(c.Data)
 		case html.ElementNode:
 			children = append(children, nodeToJS(c))
 		}
 	}
 	return map[string]any{
-		"tag":      n.Data,
-		"attrs":    attrs,
-		"text":     text.String(),
-		"children": children,
+		"tag":         n.Data,
+		"attrs":       attrs,
+		"text":        directText.String(),
+		"textContent": recursiveTextContent(n),
+		"children":    children,
 	}
+}
+
+// recursiveTextContent walks every descendant text node and returns
+// their concatenation. Matches DOM's element.textContent semantics.
+// Script and style content is included (DOM behavior) — callers that
+// want the visible text only should pre-filter at the selector level.
+func recursiveTextContent(n *html.Node) string {
+	if n == nil {
+		return ""
+	}
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.TextNode {
+			b.WriteString(n.Data)
+			return
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(n)
+	return b.String()
 }
 
 // checkFetchPolicy enforces the schema's allowlist plus unconditional

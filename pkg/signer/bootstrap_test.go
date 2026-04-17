@@ -235,6 +235,44 @@ func TestBootstrap_SelectAllIDPrefix(t *testing.T) {
 	}
 }
 
+func TestBootstrap_SelectAllTextVsTextContent(t *testing.T) {
+	// `text` is direct-child text nodes only; `textContent` is the DOM-
+	// style recursive concatenation. This distinction matters for schema
+	// authors reading article bodies, tweet text, etc.
+	b, err := NewJSBootstrap(BootstrapConfig{
+		Source: `
+			function bootstrap(input) {
+				var nodes = hermai.selectAll(input.html, "div#target");
+				return {
+					directOnly: nodes[0].text,
+					recursive:  nodes[0].textContent
+				};
+			}
+		`,
+	})
+	if err != nil {
+		t.Fatalf("NewJSBootstrap: %v", err)
+	}
+	html := `<html><body><div id="target">top <span>nested <b>deep</b></span> tail</div></body></html>`
+	out, err := b.Run(context.Background(), map[string]any{"html": html})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Direct-only should contain "top " and " tail" but NOT "nested" or "deep".
+	if strings.Contains(out["directOnly"], "nested") || strings.Contains(out["directOnly"], "deep") {
+		t.Errorf("directOnly should exclude descendant text, got %q", out["directOnly"])
+	}
+	if !strings.Contains(out["directOnly"], "top") {
+		t.Errorf("directOnly should include direct-child text, got %q", out["directOnly"])
+	}
+	// Recursive should contain everything.
+	for _, want := range []string{"top", "nested", "deep", "tail"} {
+		if !strings.Contains(out["recursive"], want) {
+			t.Errorf("textContent missing %q: got %q", want, out["recursive"])
+		}
+	}
+}
+
 func TestBootstrap_SelectAllChildrenTraversal(t *testing.T) {
 	// Verify frame.children[0].children[1] style traversal — what the X
 	// bootstrap needs to grab the <path d="..."> out of each SVG.

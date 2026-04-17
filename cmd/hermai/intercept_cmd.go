@@ -23,6 +23,7 @@ func newInterceptCmd() *cobra.Command {
 		cookies     []string
 		format      string
 		raw         bool
+		ndjson      bool
 		headful     bool
 		sessionSite string
 	)
@@ -114,6 +115,18 @@ Examples:
 			}
 
 			if raw {
+				if ndjson {
+					// One HAR entry per line — jq/grep-friendly without
+					// a whole-file JSON parse. Handy when the capture is
+					// multi-MB (dozens of XHRs, response bodies inlined).
+					enc := json.NewEncoder(os.Stdout)
+					for i := range capture.HAR.Entries {
+						if err := enc.Encode(capture.HAR.Entries[i]); err != nil {
+							return err
+						}
+					}
+					return nil
+				}
 				out, err := json.Marshal(capture.HAR.Entries)
 				if err != nil {
 					return err
@@ -121,6 +134,37 @@ Examples:
 				out = append(out, '\n')
 				_, err = os.Stdout.Write(out)
 				return err
+			}
+
+			// --ndjson without --raw: emit one FILTERED API entry per line.
+			// Matches the common "capture, then grep the interesting XHRs"
+			// workflow without forcing users to post-process a wrapped JSON
+			// array.
+			if ndjson {
+				filtered := browser.FilterHAR(capture.HAR)
+				enc := json.NewEncoder(os.Stdout)
+				for i := range filtered.Entries {
+					e := filtered.Entries[i]
+					line := map[string]any{
+						"method":  e.Request.Method,
+						"url":     e.Request.URL,
+						"status":  e.Response.Status,
+						"content_type": e.Response.ContentType,
+					}
+					if len(e.Request.Headers) > 0 {
+						line["request_headers"] = e.Request.Headers
+					}
+					if e.Request.Body != "" {
+						line["request_body"] = e.Request.Body
+					}
+					if e.Response.Body != "" {
+						line["response_body"] = e.Response.Body
+					}
+					if err := enc.Encode(line); err != nil {
+						return err
+					}
+				}
+				return nil
 			}
 
 			filtered := browser.FilterHAR(capture.HAR)
@@ -176,6 +220,8 @@ Examples:
 	cmd.Flags().StringVar(&wait, "wait", "", "Extra wait time after page load (e.g. 5s)")
 	cmd.Flags().StringArrayVar(&cookies, "cookie", nil, "Cookies to inject (name=value)")
 	cmd.Flags().BoolVar(&raw, "raw", false, "Include full HAR entries without filtering")
+	cmd.Flags().BoolVar(&ndjson, "ndjson", false,
+		"Emit one JSON entry per line (newline-delimited JSON) — jq/grep/awk-friendly. Combine with --raw for full entries or alone for filtered API entries.")
 	cmd.Flags().StringVar(&format, "format", "json", "Output format: json or compact")
 	cmd.Flags().BoolVar(&headful, "headful", false,
 		"Launch a visible browser window so you can perform interactions (save draft, add to cart) while capture runs")

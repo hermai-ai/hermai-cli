@@ -22,8 +22,6 @@ npx skills add hermai-ai/hermai-skills --skill hermai
 
 一個 skill 同時涵蓋兩類使用者 — 呼叫 registry 使用現有 schema,以及透過探索工具組為目錄新增網站(貢獻者 references 在需要時才載入)。
 
-從 1.x 升級?原本的 `hermai-contribute` skill 在 2.0 已併入 `hermai`。請執行 `npx skills update hermai` 與 `npx skills remove hermai-contribute`。
-
 Repo:[hermai-ai/hermai-skills](https://github.com/hermai-ai/hermai-skills)。
 
 ## Registry

@@ -17,7 +17,7 @@ Homebrew, npm, and prebuilt binaries coming soon.
 Running in Claude Code, Codex, Cursor, or another agent? Install the Hermai skill so the agent knows how to use this CLI:
 
 ```bash
-npx skills add hermai-ai/hermai
+npx skills add hermai-ai/hermai-skills --skill hermai
 ```
 
 One skill covers both audiences. When a user asks for data from a site, the agent pulls the schema and calls it. When a user wants to add a new site, the skill's contributor references (loaded on demand via progressive disclosure) walk the agent through discovery, schema authoring, and push.

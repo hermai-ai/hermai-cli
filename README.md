@@ -22,8 +22,6 @@ npx skills add hermai-ai/hermai-skills --skill hermai
 
 One skill covers both audiences. When a user asks for data from a site, the agent pulls the schema and calls it. When a user wants to add a new site, the skill's contributor references (loaded on demand via progressive disclosure) walk the agent through discovery, schema authoring, and push.
 
-Migrating from 1.x? The old `hermai-contribute` skill merged into `hermai` in 2.0. Run `npx skills update hermai` and `npx skills remove hermai-contribute`.
-
 Repo: [hermai-ai/hermai-skills](https://github.com/hermai-ai/hermai-skills).
 
 ## Call a site as an API

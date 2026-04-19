@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +58,103 @@ func TestStealthVsPlain(t *testing.T) {
 				t.Errorf("stealth got no response")
 			}
 		})
+	}
+}
+
+func TestStealth_PostPreservesContentLength(t *testing.T) {
+	var seenBody, seenContentLength string
+	var seenTransferEncoding []string
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenContentLength = r.Header.Get("Content-Length")
+		seenTransferEncoding = append([]string(nil), r.TransferEncoding...)
+		body, _ := io.ReadAll(r.Body)
+		seenBody = string(body)
+
+		if seenContentLength == "" {
+			http.Error(w, "length required", http.StatusLengthRequired)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `ok`)
+	}))
+	defer srv.Close()
+
+	client, err := httpclient.NewStealth(httpclient.Options{
+		Timeout:  10 * time.Second,
+		Insecure: true,
+	})
+	if err != nil {
+		t.Fatalf("NewStealth failed: %v", err)
+	}
+
+	const body = "api_type=json&title=hello+world"
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequestWithContext failed: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if seenContentLength != strconv.Itoa(len(body)) {
+		t.Fatalf("Content-Length = %q, want %d", seenContentLength, len(body))
+	}
+	if len(seenTransferEncoding) > 0 {
+		t.Fatalf("Transfer-Encoding = %v, want none", seenTransferEncoding)
+	}
+	if seenBody != body {
+		t.Fatalf("body = %q, want %q", seenBody, body)
+	}
+}
+
+func TestStealth_GetWithoutBodyOmitsContentLength(t *testing.T) {
+	var seenContentLength string
+	var seenTransferEncoding []string
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenContentLength = r.Header.Get("Content-Length")
+		seenTransferEncoding = append([]string(nil), r.TransferEncoding...)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `ok`)
+	}))
+	defer srv.Close()
+
+	client, err := httpclient.NewStealth(httpclient.Options{
+		Timeout:  10 * time.Second,
+		Insecure: true,
+	})
+	if err != nil {
+		t.Fatalf("NewStealth failed: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext failed: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if seenContentLength != "" {
+		t.Fatalf("Content-Length = %q, want empty", seenContentLength)
+	}
+	if len(seenTransferEncoding) > 0 {
+		t.Fatalf("Transfer-Encoding = %v, want none", seenTransferEncoding)
 	}
 }
 

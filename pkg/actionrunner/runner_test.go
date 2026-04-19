@@ -114,6 +114,69 @@ func TestRunner_SimpleAction_NoRuntime(t *testing.T) {
 	}
 }
 
+func TestRunner_FormEncodedBodyTemplate_NoRuntime(t *testing.T) {
+	var seenMethod, seenContentType, seenCookie, seenBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenMethod = r.Method
+		seenContentType = r.Header.Get("Content-Type")
+		seenCookie = r.Header.Get("Cookie")
+		b, _ := io.ReadAll(r.Body)
+		seenBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	writeCookies(t, filepath.Join(dir, "example.com"), map[string]string{"session": "abc"})
+
+	sch := &schema.Schema{
+		Domain: "example.com",
+		Actions: []schema.Action{
+			{
+				Name:        "FormWrite",
+				Method:      "POST",
+				URLTemplate: srv.URL + "/submit",
+				Headers: map[string]string{
+					"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+				},
+				BodyTemplate: "api_type=json&text={{text}}&thing_id={{thing_id}}",
+				Params: []schema.ActionParam{
+					{Name: "text", In: "body", Required: true},
+					{Name: "thing_id", In: "body", Required: true},
+				},
+			},
+		},
+	}
+
+	r, err := Run(context.Background(), Request{
+		Schema:      sch,
+		ActionName:  "FormWrite",
+		Args:        map[string]string{"text": `hi "friend" & bye`, "thing_id": "t3_abc123"},
+		SessionsDir: dir,
+		HTTPClient:  srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if r.Status != 200 {
+		t.Errorf("status = %d, want 200", r.Status)
+	}
+	if seenMethod != "POST" {
+		t.Errorf("method = %q, want POST", seenMethod)
+	}
+	if seenContentType != "application/x-www-form-urlencoded; charset=UTF-8" {
+		t.Errorf("content-type = %q", seenContentType)
+	}
+	if !strings.Contains(seenCookie, "session=abc") {
+		t.Errorf("cookie should contain session=abc, got %q", seenCookie)
+	}
+	wantBody := "api_type=json&text=hi+%22friend%22+%26+bye&thing_id=t3_abc123"
+	if seenBody != wantBody {
+		t.Errorf("body = %q, want %q", seenBody, wantBody)
+	}
+}
+
 func TestRunner_SignerAugmentedURL(t *testing.T) {
 	// A signer that returns {url: augmented, headers: {}} must have its
 	// URL written back to the outgoing request — otherwise sites that
@@ -347,7 +410,7 @@ func TestRunner_CookieRotation(t *testing.T) {
 	writeCookies(t, siteDir, map[string]string{"session": "original-value"})
 
 	sch := &schema.Schema{
-		Domain: "example.com",
+		Domain:  "example.com",
 		Actions: []schema.Action{{Name: "Rotate", Method: "GET", URLTemplate: srv.URL + "/x"}},
 	}
 	_, err := Run(context.Background(), Request{
@@ -462,7 +525,7 @@ func TestRunner_CookieFileCarriesDomain(t *testing.T) {
 	writeCookies(t, siteDir, map[string]string{"session": "original"})
 
 	sch := &schema.Schema{
-		Domain: "example.com",
+		Domain:  "example.com",
 		Actions: []schema.Action{{Name: "Rotate", Method: "GET", URLTemplate: srv.URL + "/x"}},
 	}
 	_, err := Run(context.Background(), Request{

@@ -416,14 +416,31 @@ func buildRequest(action schema.Action, args, cookies map[string]string) (*http.
 	}
 
 	var body io.Reader
-	// BodyTemplate is the production path — the schema ships a verbatim
-	// JSON template with {{var}} placeholders. We substitute user args
-	// with JSON-escaped values so they can't break out of their
-	// surrounding string.
+	// BodyTemplate is the production path. Most schemas ship JSON with
+	// {{var}} placeholders, but some authenticated write endpoints still
+	// expect application/x-www-form-urlencoded. Render according to the
+	// declared Content-Type so the schema can faithfully replay browser
+	// requests instead of forcing every action into JSON.
 	if action.BodyTemplate != "" {
-		rendered, err := renderJSONTemplate(action.BodyTemplate, args)
-		if err != nil {
-			return nil, fmt.Errorf("render body template: %w", err)
+		contentType := ""
+		for k, v := range action.Headers {
+			if strings.EqualFold(k, "Content-Type") {
+				contentType = strings.ToLower(v)
+				break
+			}
+		}
+
+		var rendered string
+		if strings.Contains(contentType, "application/x-www-form-urlencoded") {
+			rendered, err = renderFormTemplate(action.BodyTemplate, args)
+			if err != nil {
+				return nil, fmt.Errorf("render form body template: %w", err)
+			}
+		} else {
+			rendered, err = renderJSONTemplate(action.BodyTemplate, args)
+			if err != nil {
+				return nil, fmt.Errorf("render JSON body template: %w", err)
+			}
 		}
 		body = strings.NewReader(rendered)
 	} else {
@@ -508,18 +525,18 @@ func renderTemplate(tpl string, args map[string]string) (string, error) {
 // Supported filters:
 //
 //   - |json        full JSON encoding, quotes included. Use when the
-//                  placeholder sits OUTSIDE a string context:
-//                      {"count": {{count|json}}}   with count="3" → {"count": "3"}
-//                      (caller is responsible for numeric vs string intent).
+//     placeholder sits OUTSIDE a string context:
+//     {"count": {{count|json}}}   with count="3" → {"count": "3"}
+//     (caller is responsible for numeric vs string intent).
 //
 //   - |json_array  comma-split the value, JSON-encode each piece as a
-//                  string, join with commas. Use when the placeholder
-//                  sits inside a JSON array literal:
-//                      [{{product_ids|json_array}}]
-//                      --arg product_ids=119586,99811
-//                      → ["119586","99811"]
-//                  Values containing commas must use a different filter;
-//                  this one is for simple id/tag lists.
+//     string, join with commas. Use when the placeholder
+//     sits inside a JSON array literal:
+//     [{{product_ids|json_array}}]
+//     --arg product_ids=119586,99811
+//     → ["119586","99811"]
+//     Values containing commas must use a different filter;
+//     this one is for simple id/tag lists.
 //
 // Unknown filters produce a typed error — catches typos like
 // {{text|string}} at render time rather than silently emitting the raw
@@ -542,6 +559,25 @@ func renderJSONTemplate(tpl string, args map[string]string) (string, error) {
 			return "", err
 		}
 		out = out[:i] + rendered + out[i+j+2:]
+	}
+}
+
+// renderFormTemplate substitutes {{var}} in a
+// application/x-www-form-urlencoded template, URL-encoding each value.
+// Unknown vars expand to empty string, mirroring renderTemplate.
+func renderFormTemplate(tpl string, args map[string]string) (string, error) {
+	out := tpl
+	for {
+		i := strings.Index(out, "{{")
+		if i < 0 {
+			return out, nil
+		}
+		j := strings.Index(out[i:], "}}")
+		if j < 0 {
+			return "", fmt.Errorf("unclosed {{ in template")
+		}
+		name := strings.TrimSpace(out[i+2 : i+j])
+		out = out[:i] + url.QueryEscape(args[name]) + out[i+j+2:]
 	}
 }
 

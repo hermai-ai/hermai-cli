@@ -81,6 +81,18 @@ func toFHTTPRequest(req *http.Request) (*fhttp.Request, error) {
 		}
 	}
 
+	// Preserve the stdlib's computed body length when the request
+	// actually carries a body. Some write endpoints reject chunked
+	// uploads and require an explicit Content-Length header, so the
+	// stealth adapter must not drop it during net/http -> fhttp
+	// conversion. Keep bodyless requests untouched so existing GET/HEAD
+	// behavior stays as narrow as possible.
+	if req.Body != nil && req.ContentLength >= 0 {
+		fReq.ContentLength = req.ContentLength
+		fReq.Header.Set("Content-Length", strconv.FormatInt(req.ContentLength, 10))
+		fReq.TransferEncoding = nil
+	}
+
 	// Carry context for cancellation/timeout
 	fReq = fReq.WithContext(req.Context())
 

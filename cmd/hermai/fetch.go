@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hermai-ai/hermai-cli/pkg/actions"
 	"github.com/hermai-ai/hermai-cli/pkg/config"
 	"github.com/hermai-ai/hermai-cli/pkg/analyzer"
 	"github.com/hermai-ai/hermai-cli/pkg/browser"
@@ -161,6 +163,19 @@ Examples:
 
 			eng := engine.New(b, a, f, c).WithLogger(logger)
 
+			// Auto-resolve a saved session jar for the target URL's hostname.
+			// Hermai's warm-once model is: `hermai session import|bootstrap <site>`
+			// saves cookies to ~/.hermai/sessions/<site>/cookies.json; subsequent
+			// reads should replay those cookies automatically. Before this wiring
+			// fetch only honored --cookie overrides, so session-gated reads failed
+			// even when a full jar was on disk. The action runner already did this
+			// for writes — now reads get the same treatment.
+			//
+			// Precedence: saved jar first, then --cookie overrides append/override
+			// by name. Missing jar is not an error; fetch falls back to whatever
+			// --cookie values the caller passed.
+			mergedCookies := mergeCookiesForURL(sessionsDir(cfg), targetURL, cookies, logger)
+
 			opts := engine.FetchOpts{
 				ProxyURL:            cfg.Proxy,
 				Raw:                 raw,
@@ -171,7 +186,7 @@ Examples:
 				NoBrowser:           noBrowser,
 				NoCache:             noCache,
 				Insecure:            insecure,
-				Cookies:             cookies,
+				Cookies:             mergedCookies,
 			}
 
 			result, err := eng.Fetch(ctx, targetURL, opts)
@@ -341,6 +356,73 @@ func humanizeError(err error) error {
 		}
 		return fmt.Errorf("fetch failed: %w", err)
 	}
+}
+
+// mergeCookiesForURL resolves the saved session jar that matches the target
+// URL's hostname and merges its cookies with the caller's explicit --cookie
+// overrides. Hostname resolution walks the label stack so a jar saved under
+// "x.com" matches requests to "x.com", "www.x.com", or "api.x.com".
+//
+// Precedence: saved jar first; --cookie values override same-named entries
+// and append new ones. Missing jar is not an error — the returned slice is
+// exactly the caller's input. A debug log records which jar was loaded so
+// users can diagnose auth failures without re-reading the source.
+func mergeCookiesForURL(storageDir, targetURL string, explicit []string, logger *log.Logger) []string {
+	u, err := url.Parse(targetURL)
+	if err != nil || u.Host == "" {
+		return explicit
+	}
+	host := strings.ToLower(u.Hostname())
+
+	// Candidate lookup order: exact host, then progressively strip leading
+	// labels. "api.www.x.com" checks api.www.x.com → www.x.com → x.com.
+	// Stops at the last two labels — "com" alone never matches.
+	var jar *actions.CookieFile
+	var matchedSite string
+	candidates := []string{host}
+	labels := strings.Split(host, ".")
+	for i := 1; i < len(labels)-1; i++ {
+		candidates = append(candidates, strings.Join(labels[i:], "."))
+	}
+	for _, candidate := range candidates {
+		f, err := actions.LoadCookieFile(storageDir, candidate)
+		if err != nil {
+			if logger != nil {
+				logger.Debug("session jar at %s could not be read: %v", candidate, err)
+			}
+			continue
+		}
+		if f != nil && len(f.Cookies) > 0 {
+			jar = f
+			matchedSite = candidate
+			break
+		}
+	}
+	if jar == nil {
+		return explicit
+	}
+	if logger != nil {
+		logger.Debug("attached %d cookies from ~/.hermai/sessions/%s/cookies.json to %s",
+			len(jar.Cookies), matchedSite, host)
+	}
+
+	// Build name → value map with jar first, then explicit overrides.
+	merged := make(map[string]string, len(jar.Cookies)+len(explicit))
+	for name, value := range jar.Cookies {
+		merged[name] = value
+	}
+	for _, pair := range explicit {
+		name, value, ok := strings.Cut(pair, "=")
+		if !ok {
+			continue
+		}
+		merged[strings.TrimSpace(name)] = strings.TrimSpace(value)
+	}
+	out := make([]string, 0, len(merged))
+	for name, value := range merged {
+		out = append(out, name+"="+value)
+	}
+	return out
 }
 
 // looksLikeAntiBot is a shallow heuristic on error text that matches the

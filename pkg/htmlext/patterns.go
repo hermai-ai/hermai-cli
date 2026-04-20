@@ -2,6 +2,7 @@ package htmlext
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 
 	"golang.org/x/net/html"
@@ -487,7 +488,18 @@ func extractJSONObject(s string) any {
 				candidate := s[:i+1]
 				var parsed any
 				if err := json.Unmarshal([]byte(candidate), &parsed); err != nil {
-					return nil
+					// Retry after rewriting JS-only literals that a Vue/
+					// Nuxt/React SSR stringifier leaks into the payload
+					// (xiaohongshu, douyin, many mobile-first SPAs).
+					// `undefined` / `NaN` / `Infinity` / `-Infinity` →
+					// null.
+					sanitized := sanitizeJSLiterals(candidate)
+					if sanitized == candidate {
+						return nil
+					}
+					if err := json.Unmarshal([]byte(sanitized), &parsed); err != nil {
+						return nil
+					}
 				}
 				if isEmpty(parsed) {
 					return nil
@@ -508,6 +520,24 @@ func scriptText(n *html.Node) string {
 		}
 	}
 	return b.String()
+}
+
+// jsLiteralPattern matches bare JS-only literals (`undefined`, `NaN`,
+// `Infinity`, `-Infinity`) sitting right after a JSON-structural
+// delimiter (`:`, `[`, `,`), with optional whitespace between. Matching
+// only on structural delimiters — not on arbitrary whitespace — keeps
+// quoted strings like `"the value was undefined"` untouched, because
+// the space-delimiter case only fires inside strings.
+var jsLiteralPattern = regexp.MustCompile(`([:\[,])(\s*)(undefined|NaN|-Infinity|Infinity)\b`)
+
+// sanitizeJSLiterals replaces those literals with `null`. Called only
+// after the first json.Unmarshal of an extracted candidate fails, so
+// well-formed JSON is never touched.
+func sanitizeJSLiterals(src string) string {
+	if !strings.ContainsAny(src, "uNI") {
+		return src
+	}
+	return jsLiteralPattern.ReplaceAllString(src, "${1}${2}null")
 }
 
 func isEmpty(v any) bool {

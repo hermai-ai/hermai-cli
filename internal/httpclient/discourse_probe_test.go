@@ -22,9 +22,16 @@ func TestDiscourseEndpoints(t *testing.T) {
 		t.Skip("skipping network test in short mode")
 	}
 
-	// Use stealth + residential proxy for best chance
+	// Use stealth + residential proxy for best chance. Proxy URL comes from
+	// HERMAI_BRIGHTDATA_PROXY env var — skip when unset so CI stays green
+	// without a credential baked into this file. See proxy_test.go for
+	// context on why the credential must not live in the source tree.
+	proxyURL := brightDataProxyURL()
+	if proxyURL == "" {
+		t.Skip("HERMAI_BRIGHTDATA_PROXY not set — skipping Discourse proxy probe")
+	}
 	opts := httpclient.Options{
-		ProxyURL: brightDataProxy,
+		ProxyURL: proxyURL,
 		Insecure: true,
 		Timeout:  15 * time.Second,
 	}

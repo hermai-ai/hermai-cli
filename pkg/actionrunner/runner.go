@@ -405,7 +405,7 @@ func (t doerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // URL template, method, and static headers come from the schema;
 // cookies are attached as a single Cookie header.
 func buildRequest(action schema.Action, args, cookies map[string]string) (*http.Request, error) {
-	url, err := renderTemplate(action.URLTemplate, args)
+	url, err := renderTemplate(action.URLTemplate, args, cookies)
 	if err != nil {
 		return nil, fmt.Errorf("render url template: %w", err)
 	}
@@ -432,12 +432,12 @@ func buildRequest(action schema.Action, args, cookies map[string]string) (*http.
 
 		var rendered string
 		if strings.Contains(contentType, "application/x-www-form-urlencoded") {
-			rendered, err = renderFormTemplate(action.BodyTemplate, args)
+			rendered, err = renderFormTemplate(action.BodyTemplate, args, cookies)
 			if err != nil {
 				return nil, fmt.Errorf("render form body template: %w", err)
 			}
 		} else {
-			rendered, err = renderJSONTemplate(action.BodyTemplate, args)
+			rendered, err = renderJSONTemplate(action.BodyTemplate, args, cookies)
 			if err != nil {
 				return nil, fmt.Errorf("render JSON body template: %w", err)
 			}
@@ -470,7 +470,7 @@ func buildRequest(action schema.Action, args, cookies map[string]string) (*http.
 	}
 
 	for k, v := range action.Headers {
-		rendered, err := renderTemplate(v, args)
+		rendered, err := renderTemplate(v, args, cookies)
 		if err != nil {
 			return nil, fmt.Errorf("render header %q: %w", k, err)
 		}
@@ -491,10 +491,11 @@ func buildRequest(action schema.Action, args, cookies map[string]string) (*http.
 
 // renderTemplate does minimal {{var}} substitution for URL + header
 // templates. Values are substituted raw; callers are expected to
-// pass already-escaped input for URL components. Unknown vars expand
-// to empty strings — the required-args check upstream catches real
-// gaps before the request goes anywhere.
-func renderTemplate(tpl string, args map[string]string) (string, error) {
+// pass already-escaped input for URL components. Templates may also
+// reference session cookies explicitly as {{cookie.name}}. Unknown vars
+// expand to empty strings — the required-args check upstream catches
+// real gaps before the request goes anywhere.
+func renderTemplate(tpl string, args, cookies map[string]string) (string, error) {
 	out := tpl
 	for {
 		i := strings.Index(out, "{{")
@@ -506,7 +507,11 @@ func renderTemplate(tpl string, args map[string]string) (string, error) {
 			return "", fmt.Errorf("unclosed {{ in template")
 		}
 		name := strings.TrimSpace(out[i+2 : i+j])
-		out = out[:i] + args[name] + out[i+j+2:]
+		val := args[name]
+		if strings.HasPrefix(name, "cookie.") {
+			val = cookies[strings.TrimPrefix(name, "cookie.")]
+		}
+		out = out[:i] + val + out[i+j+2:]
 	}
 }
 
@@ -541,7 +546,7 @@ func renderTemplate(tpl string, args map[string]string) (string, error) {
 // Unknown filters produce a typed error — catches typos like
 // {{text|string}} at render time rather than silently emitting the raw
 // unfiltered value.
-func renderJSONTemplate(tpl string, args map[string]string) (string, error) {
+func renderJSONTemplate(tpl string, args, cookies map[string]string) (string, error) {
 	out := tpl
 	for {
 		i := strings.Index(out, "{{")
@@ -554,6 +559,9 @@ func renderJSONTemplate(tpl string, args map[string]string) (string, error) {
 		}
 		name, filter := parseTemplateVar(out[i+2 : i+j])
 		val := args[name]
+		if strings.HasPrefix(name, "cookie.") {
+			val = cookies[strings.TrimPrefix(name, "cookie.")]
+		}
 		rendered, err := applyJSONFilter(val, filter, name)
 		if err != nil {
 			return "", err
@@ -564,8 +572,10 @@ func renderJSONTemplate(tpl string, args map[string]string) (string, error) {
 
 // renderFormTemplate substitutes {{var}} in a
 // application/x-www-form-urlencoded template, URL-encoding each value.
-// Unknown vars expand to empty string, mirroring renderTemplate.
-func renderFormTemplate(tpl string, args map[string]string) (string, error) {
+// Templates may also reference session cookies explicitly as
+// {{cookie.name}}. Unknown vars expand to empty string, mirroring
+// renderTemplate.
+func renderFormTemplate(tpl string, args, cookies map[string]string) (string, error) {
 	out := tpl
 	for {
 		i := strings.Index(out, "{{")
@@ -577,7 +587,11 @@ func renderFormTemplate(tpl string, args map[string]string) (string, error) {
 			return "", fmt.Errorf("unclosed {{ in template")
 		}
 		name := strings.TrimSpace(out[i+2 : i+j])
-		out = out[:i] + url.QueryEscape(args[name]) + out[i+j+2:]
+		val := args[name]
+		if strings.HasPrefix(name, "cookie.") {
+			val = cookies[strings.TrimPrefix(name, "cookie.")]
+		}
+		out = out[:i] + url.QueryEscape(val) + out[i+j+2:]
 	}
 }
 

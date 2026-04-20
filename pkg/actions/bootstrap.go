@@ -459,7 +459,11 @@ func defaultChromiumBinaryDarwin() string {
 // (macOS default is Safari in that case, and we fall through to the
 // candidate list).
 func readDarwinHTTPSHandlerBundleID() string {
-	plistPath := filepath.Join(os.Getenv("HOME"), "Library", "Preferences", "com.apple.LaunchServices", "com.apple.launchservices.secure.plist")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	plistPath := filepath.Join(home, "Library", "Preferences", "com.apple.LaunchServices", "com.apple.launchservices.secure.plist")
 	out, err := exec.Command("plutil", "-convert", "json", "-o", "-", plistPath).Output()
 	if err != nil {
 		return ""
@@ -630,10 +634,11 @@ func resolveLinuxExecBinary(execLine string) string {
 			return ""
 		}
 		// System install first — matches xdg-mime's own lookup order.
-		for _, dir := range []string{
-			"/var/lib/flatpak/exports/bin",
-			filepath.Join(os.Getenv("HOME"), ".local", "share", "flatpak", "exports", "bin"),
-		} {
+		dirs := []string{"/var/lib/flatpak/exports/bin"}
+		if home, err := os.UserHomeDir(); err == nil {
+			dirs = append(dirs, filepath.Join(home, ".local", "share", "flatpak", "exports", "bin"))
+		}
+		for _, dir := range dirs {
 			p := filepath.Join(dir, id)
 			if _, err := os.Stat(p); err == nil {
 				return p
@@ -681,47 +686,47 @@ func firstExecToken(execLine string) string {
 // extractFlatpakBundleID scans a `flatpak run …` Exec= line for the
 // app bundle identifier (`com.brave.Browser`, `com.google.Chrome`, …).
 // Pure function — tokenizes on whitespace and accepts the first token
-// that looks like a reverse-DNS bundle ID (≥ 2 dots, all-alphanumeric
-// labels plus `-`/`_`). Returns "" when no such token is present.
+// that has the shape of a 3-label-or-more reverse-DNS bundle ID:
+// [A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(\.…)? Rules out
+// flatpak's own flags (`--branch=stable`) and bare identifiers by the
+// dot count, and path-like arguments by the character-class check.
+// Returns "" when no such token is present.
 func extractFlatpakBundleID(execLine string) string {
 	for _, tok := range strings.Fields(execLine) {
 		if strings.Count(tok, ".") < 2 {
 			continue
 		}
-		if !isLikelyBundleID(tok) {
+		valid := true
+		for _, r := range tok {
+			switch {
+			case r >= 'a' && r <= 'z':
+			case r >= 'A' && r <= 'Z':
+			case r >= '0' && r <= '9':
+			case r == '.' || r == '_' || r == '-':
+			default:
+				valid = false
+			}
+			if !valid {
+				break
+			}
+		}
+		if !valid {
+			continue
+		}
+		// Reject leading/trailing dots and empty dot-separated labels.
+		emptyLabel := false
+		for _, label := range strings.Split(tok, ".") {
+			if label == "" {
+				emptyLabel = true
+				break
+			}
+		}
+		if emptyLabel {
 			continue
 		}
 		return tok
 	}
 	return ""
-}
-
-// isLikelyBundleID returns true when tok has the shape of a reverse-DNS
-// bundle identifier: ≥ 2 dot-separated labels of [A-Za-z0-9_-]. Rejects
-// tokens with path separators, `@`, `=`, `%`, and anything that doesn't
-// have at least one dot — which rules out flatpak's own flags
-// (`--branch=stable`) and bare identifiers like `brave` or `chrome`.
-func isLikelyBundleID(tok string) bool {
-	if !strings.Contains(tok, ".") {
-		return false
-	}
-	for _, r := range tok {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= 'A' && r <= 'Z':
-		case r >= '0' && r <= '9':
-		case r == '.' || r == '_' || r == '-':
-		default:
-			return false
-		}
-	}
-	// Reject leading/trailing dots and dot-only labels.
-	for _, label := range strings.Split(tok, ".") {
-		if label == "" {
-			return false
-		}
-	}
-	return true
 }
 
 // extractSnapName pulls the snap name out of a `snap run <name>` Exec=
@@ -746,14 +751,18 @@ func extractSnapName(execLine string) string {
 // files live on a typical Linux install, user-local first so Flatpak /
 // personal installs override system ones.
 func linuxApplicationDirs() []string {
-	home := os.Getenv("HOME")
-	dirs := []string{
-		filepath.Join(home, ".local", "share", "applications"),
+	dirs := []string{}
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".local", "share", "applications"))
+	}
+	dirs = append(dirs,
 		"/usr/local/share/applications",
 		"/usr/share/applications",
 		"/var/lib/snapd/desktop/applications",
 		"/var/lib/flatpak/exports/share/applications",
-		filepath.Join(home, ".local", "share", "flatpak", "exports", "share", "applications"),
+	)
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".local", "share", "flatpak", "exports", "share", "applications"))
 	}
 	return dirs
 }
@@ -814,7 +823,7 @@ func isChromiumBinaryName(binPath string) bool {
 		"chrome",
 		"google-chrome", "google-chrome-stable", "google-chrome-beta", "google-chrome-unstable",
 		"chrome-beta", "chrome-dev", "chrome-canary", "google chrome", "google chrome beta", "google chrome dev", "google chrome canary",
-		"chromium", "chromium-browser", "chromium-browser-privacy",
+		"chromium", "chromium-browser",
 		"brave", "brave-browser", "brave-browser-stable", "brave-browser-beta", "brave-browser-nightly", "brave browser",
 		"msedge", "microsoft-edge", "microsoft-edge-stable", "microsoft-edge-beta", "microsoft-edge-dev", "microsoft edge",
 		"opera", "opera-stable", "opera-beta", "opera-developer", "opera_launcher",

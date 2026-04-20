@@ -139,14 +139,22 @@ func TestFirstExecToken(t *testing.T) {
 
 func TestExtractFlatpakBundleID(t *testing.T) {
 	cases := map[string]string{
+		// Real flatpak browser Exec= lines
 		"/usr/bin/flatpak run --branch=stable --arch=x86_64 --command=chrome com.google.Chrome": "com.google.Chrome",
 		"/usr/bin/flatpak run com.brave.Browser":                                                 "com.brave.Browser",
 		"/usr/bin/flatpak run org.chromium.Chromium @@u @@":                                      "org.chromium.Chromium",
-		// No bundle ID present — only flags.
-		"/usr/bin/flatpak run --version": "",
-		// Not a flatpak line at all; function still scans but shouldn't trip on a hostname.
-		"/usr/bin/google-chrome --proxy-server=127.0.0.1:8080": "",
-		"": "",
+		// No bundle-ID-shaped token anywhere in the line
+		"/usr/bin/flatpak run --version":                                           "",
+		"/usr/bin/google-chrome --proxy-server=127.0.0.1:8080":                     "",
+		"":                                                                        "",
+		// Tokens that look bundle-id-adjacent but must be rejected: too few dots,
+		// path separators, empty labels, characters outside the allowed class.
+		"/usr/bin/flatpak run com.foo":                "", // only one dot → rejected
+		"/usr/bin/flatpak run com/google/chrome":     "", // path separators → rejected
+		"/usr/bin/flatpak run com..google.chrome":    "", // empty dot-separated label → rejected
+		"/usr/bin/flatpak run .com.google.chrome":    "", // leading dot → rejected
+		"/usr/bin/flatpak run com.google.chrome.":    "", // trailing dot → rejected
+		"/usr/bin/flatpak run --branch=stable":        "", // = sign → rejected
 	}
 	for in, want := range cases {
 		if got := extractFlatpakBundleID(in); got != want {
@@ -167,21 +175,6 @@ func TestExtractSnapName(t *testing.T) {
 	for in, want := range cases {
 		if got := extractSnapName(in); got != want {
 			t.Errorf("extractSnapName(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-func TestIsLikelyBundleID(t *testing.T) {
-	pos := []string{"com.google.Chrome", "com.brave.Browser", "org.chromium.Chromium", "com.microsoft.Edge"}
-	for _, s := range pos {
-		if !isLikelyBundleID(s) {
-			t.Errorf("isLikelyBundleID(%q) = false, want true", s)
-		}
-	}
-	neg := []string{"", "no-dots", "--branch=stable", "com.", ".com.google", "com..google", "com/google/chrome", "%U"}
-	for _, s := range neg {
-		if isLikelyBundleID(s) {
-			t.Errorf("isLikelyBundleID(%q) = true, want false", s)
 		}
 	}
 }

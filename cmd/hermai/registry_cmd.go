@@ -112,14 +112,13 @@ func newRegistryLoginCmd() *cobra.Command {
 		Short: "Save a platform API key to the hermai config",
 		Long: `login walks you through pasting an API key from the dashboard.
 
-Sign in at https://hermai.ai with your GitHub account, copy the API key from
-the dashboard, and paste it here. The key is stored in ~/.hermai/config.yaml
-with 0600 permissions.`,
+Sign in at https://hermai.ai, copy the API key from the dashboard, and paste
+it here. The key is stored in ~/.hermai/config.yaml with 0600 permissions.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := config.Load()
 			fmt.Printf("1. Open the dashboard:\n")
 			fmt.Printf("   %s\n\n", dashboardURL(cfg.Platform.URL))
-			fmt.Printf("2. Sign in with GitHub and copy your API key.\n\n")
+			fmt.Printf("2. Sign in to your account and copy your API key.\n\n")
 			fmt.Printf("Paste your API key (starts with hm_sk_): ")
 
 			reader := bufio.NewReader(os.Stdin)

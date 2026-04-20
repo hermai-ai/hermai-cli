@@ -59,32 +59,38 @@ func TestParseDesktopExec(t *testing.T) {
 		want    string
 	}{
 		{
-			name: "typical brave desktop file",
+			name: "typical chrome desktop file",
 			content: `[Desktop Entry]
-Name=Brave
-Exec=/usr/bin/brave-browser-stable %U
+Name=Google Chrome
+Exec=/usr/bin/google-chrome-stable %U
 Type=Application`,
-			want: "/usr/bin/brave-browser-stable",
+			want: "/usr/bin/google-chrome-stable",
 		},
 		{
-			name: "quoted path with spaces",
-			content: `[Desktop Entry]
-Exec="/opt/Google Chrome/chrome" %U`,
-			want: "/opt/Google Chrome/chrome",
-		},
-		{
-			name: "field codes get stripped",
+			name: "field codes stripped but args preserved",
 			content: `[Desktop Entry]
 Exec=chromium %F --new-window`,
-			want: "chromium",
+			want: "chromium --new-window",
+		},
+		{
+			name: "flatpak wrapper full argv preserved",
+			content: `[Desktop Entry]
+Exec=/usr/bin/flatpak run --branch=stable --arch=x86_64 --command=chrome com.google.Chrome %U`,
+			want: "/usr/bin/flatpak run --branch=stable --arch=x86_64 --command=chrome com.google.Chrome",
+		},
+		{
+			name: "snap wrapper argv preserved",
+			content: `[Desktop Entry]
+Exec=snap run brave %U`,
+			want: "snap run brave",
 		},
 		{
 			name: "exec outside [Desktop Entry] section is ignored",
 			content: `[Desktop Action NewWindow]
 Exec=/usr/bin/IGNORE-ME %u
 [Desktop Entry]
-Exec=/usr/bin/brave %U`,
-			want: "/usr/bin/brave",
+Exec=/usr/bin/google-chrome %U`,
+			want: "/usr/bin/google-chrome",
 		},
 		{
 			name: "exec before [Desktop Entry] section is ignored",
@@ -116,24 +122,158 @@ Name=Browser`,
 	}
 }
 
+func TestFirstExecToken(t *testing.T) {
+	cases := map[string]string{
+		"/usr/bin/google-chrome --new-window": "/usr/bin/google-chrome",
+		`"/opt/Google Chrome/chrome" %U`:      "/opt/Google Chrome/chrome",
+		"":                                    "",
+		"   ":                                 "",
+		`"unterminated`:                       "",
+	}
+	for in, want := range cases {
+		if got := firstExecToken(in); got != want {
+			t.Errorf("firstExecToken(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestExtractFlatpakBundleID(t *testing.T) {
+	cases := map[string]string{
+		"/usr/bin/flatpak run --branch=stable --arch=x86_64 --command=chrome com.google.Chrome": "com.google.Chrome",
+		"/usr/bin/flatpak run com.brave.Browser":                                                 "com.brave.Browser",
+		"/usr/bin/flatpak run org.chromium.Chromium @@u @@":                                      "org.chromium.Chromium",
+		// No bundle ID present — only flags.
+		"/usr/bin/flatpak run --version": "",
+		// Not a flatpak line at all; function still scans but shouldn't trip on a hostname.
+		"/usr/bin/google-chrome --proxy-server=127.0.0.1:8080": "",
+		"": "",
+	}
+	for in, want := range cases {
+		if got := extractFlatpakBundleID(in); got != want {
+			t.Errorf("extractFlatpakBundleID(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestExtractSnapName(t *testing.T) {
+	cases := map[string]string{
+		"snap run brave":                "brave",
+		"snap run --shell chromium":     "chromium",
+		"/snap/bin/brave":               "",
+		"snap run":                      "",
+		"":                              "",
+		"google-chrome --new-window":    "",
+	}
+	for in, want := range cases {
+		if got := extractSnapName(in); got != want {
+			t.Errorf("extractSnapName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestIsLikelyBundleID(t *testing.T) {
+	pos := []string{"com.google.Chrome", "com.brave.Browser", "org.chromium.Chromium", "com.microsoft.Edge"}
+	for _, s := range pos {
+		if !isLikelyBundleID(s) {
+			t.Errorf("isLikelyBundleID(%q) = false, want true", s)
+		}
+	}
+	neg := []string{"", "no-dots", "--branch=stable", "com.", ".com.google", "com..google", "com/google/chrome", "%U"}
+	for _, s := range neg {
+		if isLikelyBundleID(s) {
+			t.Errorf("isLikelyBundleID(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestParseRegSZValue(t *testing.T) {
+	progIDOutput := `
+HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice
+    ProgId    REG_SZ    ChromeHTML
+    Hash      REG_SZ    xxxxxxxxxxxxxxxxxxxx=
+`
+	if got := parseRegSZValue(progIDOutput, "ProgId"); got != "ChromeHTML" {
+		t.Errorf("ProgId lookup got %q, want ChromeHTML", got)
+	}
+
+	shellOpenOutput := `
+HKEY_CLASSES_ROOT\ChromeHTML\shell\open\command
+    (Default)    REG_SZ    "C:\Program Files\Google\Chrome\Application\chrome.exe" --single-argument %1
+`
+	want := `"C:\Program Files\Google\Chrome\Application\chrome.exe" --single-argument %1`
+	if got := parseRegSZValue(shellOpenOutput, "(Default)"); got != want {
+		t.Errorf("(Default) lookup got %q, want %q", got, want)
+	}
+
+	// Asking for a value that doesn't exist returns empty.
+	if got := parseRegSZValue(progIDOutput, "DoesNotExist"); got != "" {
+		t.Errorf("missing value should return \"\", got %q", got)
+	}
+
+	// Header lines containing REG_SZ in unexpected places must not spoof the parse.
+	spoof := `The REG_SZ format is described in the reg.exe docs.
+    (Default)    REG_SZ    C:\real\value.exe
+`
+	if got := parseRegSZValue(spoof, "(Default)"); got != `C:\real\value.exe` {
+		t.Errorf("spoof-resistant lookup got %q", got)
+	}
+}
+
 func TestIsChromiumBinaryName(t *testing.T) {
 	cases := map[string]bool{
-		"/usr/bin/brave-browser":                    true,
-		"/usr/bin/google-chrome-stable":             true,
-		"/opt/google/chrome/chrome":                 true,
-		"/snap/bin/chromium":                        true,
-		"/usr/bin/microsoft-edge":                   true,
-		"C:\\Program Files\\Vivaldi\\vivaldi.exe":   true,
-		"/Applications/Arc.app/Contents/MacOS/Arc":  true,
-		"/usr/bin/firefox":                          false,
-		"/usr/bin/librewolf":                        false,
+		// Positive: known Chromium-family binary names
+		"/usr/bin/google-chrome":                         true,
+		"/usr/bin/google-chrome-stable":                  true,
+		"/opt/google/chrome/chrome":                      true,
+		"/snap/bin/chromium":                             true,
+		"/usr/bin/chromium-browser":                      true,
+		"/usr/bin/microsoft-edge":                        true,
+		"/usr/bin/microsoft-edge-stable":                 true,
+		"/usr/bin/brave-browser":                         true,
+		"/usr/bin/brave-browser-nightly":                 true,
+		// Bare Windows .exe basenames (filepath.Base doesn't handle Windows
+		// backslashes on non-Windows hosts, so we assert the basename form
+		// here and rely on runtime.GOOS="windows" doing the right thing).
+		"chrome.exe":  true,
+		"msedge.exe":  true,
+		"vivaldi.exe": true,
+		"brave.exe":   true,
+		"/Applications/Arc.app/Contents/MacOS/Arc":      true,
+		// Negative: non-Chromium browsers
+		"/usr/bin/firefox":                               false,
+		"/usr/bin/librewolf":                             false,
 		"/Applications/Safari.app/Contents/MacOS/Safari": false,
-		"":                                          false,
+		// Negative: words that would have matched substring-only ("arc", "edge", "opera", "chrome")
+		"/usr/bin/research":                              false,
+		"/usr/bin/hedgehog":                              false,
+		"/usr/bin/wedge":                                 false,
+		"/usr/bin/ledger":                                false,
+		"/usr/bin/helichrome":                            false,
+		"/usr/bin/operations":                            false,
+		"":                                               false,
 	}
 	for path, want := range cases {
 		if got := isChromiumBinaryName(path); got != want {
 			t.Errorf("isChromiumBinaryName(%q) = %v, want %v", path, got, want)
 		}
+	}
+}
+
+func TestFindSystemChromiumBinarySmoke(t *testing.T) {
+	// Contract smoke: findSystemChromiumBinary must either return a path
+	// that currently exists or an empty string — never a stale path or
+	// an un-runnable command. Runs on whatever OS + browser mix the dev
+	// machine has, so specific assertions aren't portable.
+	bin := findSystemChromiumBinary()
+	t.Logf("findSystemChromiumBinary = %q", bin)
+	if bin == "" {
+		t.Skip("no Chromium-family browser found on this host — skipping contract assertion")
+	}
+	if _, err := os.Stat(bin); err != nil {
+		t.Errorf("findSystemChromiumBinary returned %q which does not exist on disk: %v", bin, err)
+	}
+	if !isChromiumBinaryName(bin) {
+		t.Errorf("findSystemChromiumBinary returned %q which our own allow-list rejects", bin)
 	}
 }
 

@@ -561,14 +561,13 @@ func isChromiumBundleID(id string) bool {
 }
 
 // defaultChromiumBinaryLinux resolves the user's default browser via
-// xdg-mime (the same call `default-browser` uses), reads the resulting
-// .desktop file from the user / system application dirs, parses its
-// Exec= line, and returns the binary path if it looks Chromium-family.
-//
-// This replaces a hardcoded desktop-file-name → binary map because the
-// map missed Flatpak / Snap installs whose .desktop files carry quite
-// different Exec= strings (`/var/lib/flatpak/.../brave`) and also missed
-// browsers installed under ~/.local/share/applications.
+// xdg-mime, reads the resulting .desktop file from the user / system
+// application dirs, parses its Exec= line, and returns the binary path
+// if it looks Chromium-family. Handles native binaries, Snap wrappers
+// (Exec=`snap run brave`), and Flatpak wrappers (Exec=`/usr/bin/flatpak
+// run --branch=stable com.brave.Browser`) — the last two show up as
+// wrapper commands and need a second step to resolve to something that
+// rod / CDP can actually launch.
 func defaultChromiumBinaryLinux() string {
 	out, err := exec.Command("xdg-mime", "query", "default", "x-scheme-handler/https").Output()
 	if err != nil || strings.TrimSpace(string(out)) == "" {
@@ -589,7 +588,11 @@ func defaultChromiumBinaryLinux() string {
 		if err != nil {
 			continue
 		}
-		bin := parseDesktopExec(string(data))
+		execLine := parseDesktopExec(string(data))
+		if execLine == "" {
+			continue
+		}
+		bin := resolveLinuxExecBinary(execLine)
 		if bin == "" {
 			continue
 		}
@@ -602,6 +605,138 @@ func defaultChromiumBinaryLinux() string {
 		}
 		if isChromiumBinaryName(bin) {
 			return bin
+		}
+	}
+	return ""
+}
+
+// resolveLinuxExecBinary turns a raw .desktop Exec= value into an actual
+// launchable browser binary path. For the common case it's just the
+// first token. For sandbox wrappers (flatpak / snap) it peeks at the
+// full argv to extract the bundle ID or snap name, then returns the
+// path to the corresponding wrapper script in /var/lib/flatpak or
+// /snap/bin — which is what rod needs to spawn the browser with a
+// CDP port attached. Returns "" when the wrapper target isn't found
+// on disk.
+func resolveLinuxExecBinary(execLine string) string {
+	first := firstExecToken(execLine)
+	if first == "" {
+		return ""
+	}
+	switch filepath.Base(first) {
+	case "flatpak":
+		id := extractFlatpakBundleID(execLine)
+		if id == "" {
+			return ""
+		}
+		// System install first — matches xdg-mime's own lookup order.
+		for _, dir := range []string{
+			"/var/lib/flatpak/exports/bin",
+			filepath.Join(os.Getenv("HOME"), ".local", "share", "flatpak", "exports", "bin"),
+		} {
+			p := filepath.Join(dir, id)
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+		return ""
+	case "snap":
+		name := extractSnapName(execLine)
+		if name == "" {
+			return ""
+		}
+		p := filepath.Join("/snap/bin", name)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		return ""
+	default:
+		return first
+	}
+}
+
+// firstExecToken returns the first whitespace-separated token of a
+// .desktop Exec= value. Handles a leading double-quoted path with
+// spaces inside. Pure function — used by resolveLinuxExecBinary and
+// tested directly.
+func firstExecToken(execLine string) string {
+	cmd := strings.TrimSpace(execLine)
+	if cmd == "" {
+		return ""
+	}
+	if cmd[0] == '"' {
+		end := strings.IndexByte(cmd[1:], '"')
+		if end < 0 {
+			return ""
+		}
+		return cmd[1 : end+1]
+	}
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+// extractFlatpakBundleID scans a `flatpak run …` Exec= line for the
+// app bundle identifier (`com.brave.Browser`, `com.google.Chrome`, …).
+// Pure function — tokenizes on whitespace and accepts the first token
+// that looks like a reverse-DNS bundle ID (≥ 2 dots, all-alphanumeric
+// labels plus `-`/`_`). Returns "" when no such token is present.
+func extractFlatpakBundleID(execLine string) string {
+	for _, tok := range strings.Fields(execLine) {
+		if strings.Count(tok, ".") < 2 {
+			continue
+		}
+		if !isLikelyBundleID(tok) {
+			continue
+		}
+		return tok
+	}
+	return ""
+}
+
+// isLikelyBundleID returns true when tok has the shape of a reverse-DNS
+// bundle identifier: ≥ 2 dot-separated labels of [A-Za-z0-9_-]. Rejects
+// tokens with path separators, `@`, `=`, `%`, and anything that doesn't
+// have at least one dot — which rules out flatpak's own flags
+// (`--branch=stable`) and bare identifiers like `brave` or `chrome`.
+func isLikelyBundleID(tok string) bool {
+	if !strings.Contains(tok, ".") {
+		return false
+	}
+	for _, r := range tok {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-':
+		default:
+			return false
+		}
+	}
+	// Reject leading/trailing dots and dot-only labels.
+	for _, label := range strings.Split(tok, ".") {
+		if label == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// extractSnapName pulls the snap name out of a `snap run <name>` Exec=
+// line. Returns "" if no positional argument follows `run`. Pure function.
+func extractSnapName(execLine string) string {
+	toks := strings.Fields(execLine)
+	for i, tok := range toks {
+		if tok != "run" {
+			continue
+		}
+		// Skip any --flag=value after `run` to reach the positional name.
+		for j := i + 1; j < len(toks); j++ {
+			if !strings.HasPrefix(toks[j], "-") {
+				return toks[j]
+			}
 		}
 	}
 	return ""
@@ -623,11 +758,12 @@ func linuxApplicationDirs() []string {
 	return dirs
 }
 
-// parseDesktopExec extracts the first token of the Exec= line in the
-// [Desktop Entry] section of a Freedesktop .desktop file. Handles quoted
-// paths (for Exec entries with spaces) and strips trailing field codes
-// (%u, %U, %f, %F, etc.) which would otherwise get glued to the path.
-// Pure function; no filesystem or exec access — tested directly.
+// parseDesktopExec returns the full Exec= value from the [Desktop Entry]
+// section of a Freedesktop .desktop file, with field codes (%u, %U, %f,
+// %F, %i, %c, %k) removed so callers get a clean argv. Returns the raw
+// argv because sandbox wrappers (flatpak / snap) need their full line
+// to extract the bundle ID or snap name — the first token alone isn't
+// enough. Pure function; no filesystem or exec access.
 func parseDesktopExec(content string) string {
 	inEntry := false
 	for _, line := range strings.Split(content, "\n") {
@@ -642,41 +778,49 @@ func parseDesktopExec(content string) string {
 		if !strings.HasPrefix(trimmed, "Exec=") {
 			continue
 		}
-		cmd := strings.TrimPrefix(trimmed, "Exec=")
-		if cmd == "" {
-			return ""
-		}
-		// Quoted path: "C:\path with spaces\brave.exe" %U
-		if cmd[0] == '"' {
-			end := strings.IndexByte(cmd[1:], '"')
-			if end < 0 {
-				return ""
-			}
-			return cmd[1 : end+1]
-		}
-		// Strip field codes like %u, %U, %f, %F that follow the binary.
-		fields := strings.Fields(cmd)
-		if len(fields) == 0 {
-			return ""
-		}
-		return fields[0]
+		return stripDesktopFieldCodes(strings.TrimPrefix(trimmed, "Exec="))
 	}
 	return ""
 }
 
-// isChromiumBinaryName returns true when the basename of the path matches
-// a known Chromium-family binary. Guards against xdg-mime happily pointing
-// us at Firefox / LibreWolf on systems where the user reset their default.
+// stripDesktopFieldCodes removes .desktop field codes (%u, %U, %f, %F,
+// %i, %c, %k) that appear as stand-alone whitespace-separated tokens.
+// Per the Freedesktop spec these are expanded by the launcher at run
+// time; we never expand them so they'd just pollute the argv.
+func stripDesktopFieldCodes(argv string) string {
+	fields := strings.Fields(argv)
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if len(f) == 2 && f[0] == '%' {
+			continue
+		}
+		out = append(out, f)
+	}
+	return strings.Join(out, " ")
+}
+
+// isChromiumBinaryName returns true when the basename of the path is a
+// known Chromium-family browser binary. Uses an exact-name allow-list
+// (case-insensitive, .exe suffix tolerated) rather than substring match
+// so we don't falsely accept `/usr/bin/research` (contains "arc"),
+// `/usr/bin/ledger` (contains "edge"), or similar neighbors. The `.app`
+// bundle names aren't handled here because the macOS flow gates on
+// bundle ID before ever calling this function.
 func isChromiumBinaryName(binPath string) bool {
 	base := strings.ToLower(filepath.Base(binPath))
-	for _, needle := range []string{
-		"brave", "google-chrome", "chrome", "chromium",
-		"microsoft-edge", "msedge", "edge",
-		"opera", "vivaldi", "arc",
-	} {
-		if strings.Contains(base, needle) {
-			return true
-		}
+	base = strings.TrimSuffix(base, ".exe")
+	switch base {
+	case
+		"chrome",
+		"google-chrome", "google-chrome-stable", "google-chrome-beta", "google-chrome-unstable",
+		"chrome-beta", "chrome-dev", "chrome-canary", "google chrome", "google chrome beta", "google chrome dev", "google chrome canary",
+		"chromium", "chromium-browser", "chromium-browser-privacy",
+		"brave", "brave-browser", "brave-browser-stable", "brave-browser-beta", "brave-browser-nightly", "brave browser",
+		"msedge", "microsoft-edge", "microsoft-edge-stable", "microsoft-edge-beta", "microsoft-edge-dev", "microsoft edge",
+		"opera", "opera-stable", "opera-beta", "opera-developer", "opera_launcher",
+		"vivaldi", "vivaldi-stable", "vivaldi-snapshot",
+		"arc":
+		return true
 	}
 	return false
 }
@@ -717,31 +861,41 @@ func readWindowsProgID() string {
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) >= 3 && fields[0] == "ProgId" {
-			return fields[len(fields)-1]
-		}
-	}
-	return ""
+	return parseRegSZValue(string(out), "ProgId")
 }
 
 // readWindowsShellOpenCommand returns the raw command-line string the
 // given ProgID registers for the "open" verb. Typical content:
 //
 //	"C:\Program Files\Google\Chrome\Application\chrome.exe" --single-argument %1
+//
+// Scoped to the `(Default)` line so an unusual registry dump with
+// REG_SZ strings elsewhere in its header can't fool the parser.
 func readWindowsShellOpenCommand(progID string) string {
 	out, err := exec.Command("reg", "query",
 		fmt.Sprintf(`HKCR\%s\shell\open\command`, progID), "/ve").Output()
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		idx := strings.Index(line, "REG_SZ")
+	return parseRegSZValue(string(out), "(Default)")
+}
+
+// parseRegSZValue parses `reg query` output and returns the REG_SZ
+// value associated with the given value name. The value name sits in
+// field 0 of its line ("(Default)" for an unnamed default, or the
+// literal name string for a named value); REG_SZ sits between the
+// name and the value. Pure function — tested directly.
+func parseRegSZValue(out, valueName string) string {
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, valueName) {
+			continue
+		}
+		idx := strings.Index(trimmed, "REG_SZ")
 		if idx < 0 {
 			continue
 		}
-		return strings.TrimSpace(line[idx+len("REG_SZ"):])
+		return strings.TrimSpace(trimmed[idx+len("REG_SZ"):])
 	}
 	return ""
 }
@@ -791,19 +945,22 @@ func expandWindowsEnvVars(path string) string {
 	}
 }
 
-// chromiumFallbackCandidates lists every binary path we know how to find for
-// Chromium-family browsers on the current OS, in preference order: Brave,
-// Chrome, Edge, Arc, Chromium, Opera, Vivaldi. Order matters only when a host
-// has multiple installed; whichever is first wins.
+// chromiumFallbackCandidates lists binary paths for Chromium-family
+// browsers on the current OS, ordered by global market share so the
+// most likely installed browser gets tried first when we can't read the
+// user's default. Chrome (~65% share) → Edge (~12%, pre-installed on
+// Windows) → Chromium (open-source build, common on dev machines) →
+// Brave → Arc (macOS only) → Opera → Vivaldi. Order only matters for
+// hosts where multiple are installed; the first one that exists wins.
 func chromiumFallbackCandidates() []string {
 	switch runtime.GOOS {
 	case "darwin":
 		return []string{
-			"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
 			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 			"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-			"/Applications/Arc.app/Contents/MacOS/Arc",
 			"/Applications/Chromium.app/Contents/MacOS/Chromium",
+			"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+			"/Applications/Arc.app/Contents/MacOS/Arc",
 			"/Applications/Opera.app/Contents/MacOS/Opera",
 			"/Applications/Vivaldi.app/Contents/MacOS/Vivaldi",
 			"/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
@@ -811,14 +968,14 @@ func chromiumFallbackCandidates() []string {
 			"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
 		}
 	case "linux":
-		out := make([]string, 0, 8)
+		out := make([]string, 0, 12)
 		for _, bin := range []string{
-			"brave-browser", "brave",
-			"google-chrome", "google-chrome-stable",
-			"microsoft-edge", "microsoft-edge-stable",
+			"google-chrome-stable", "google-chrome",
+			"microsoft-edge-stable", "microsoft-edge",
 			"chromium", "chromium-browser",
+			"brave-browser", "brave",
 			"opera",
-			"vivaldi", "vivaldi-stable",
+			"vivaldi-stable", "vivaldi",
 		} {
 			if p, err := exec.LookPath(bin); err == nil {
 				out = append(out, p)
@@ -832,20 +989,20 @@ func chromiumFallbackCandidates() []string {
 			localApp = filepath.Join(home, "AppData", "Local")
 		}
 		return []string{
-			// User-local installs (MSI + per-user Chrome / Edge / Brave)
-			filepath.Join(localApp, `BraveSoftware\Brave-Browser\Application\brave.exe`),
-			filepath.Join(localApp, `Google\Chrome\Application\chrome.exe`),
-			filepath.Join(localApp, `Microsoft\Edge\Application\msedge.exe`),
-			filepath.Join(localApp, `Vivaldi\Application\vivaldi.exe`),
-			filepath.Join(localApp, `Chromium\Application\chrome.exe`),
-			// System installs
-			`C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe`,
+			// System installs — Chrome / Edge ship into Program Files on default setups
 			`C:\Program Files\Google\Chrome\Application\chrome.exe`,
 			`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
 			`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
 			`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
-			`C:\Program Files\Opera\launcher.exe`,
 			`C:\Program Files\Chromium\Application\chrome.exe`,
+			`C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe`,
+			`C:\Program Files\Opera\launcher.exe`,
+			// User-local installs (per-user MSI, %LOCALAPPDATA% installs)
+			filepath.Join(localApp, `Google\Chrome\Application\chrome.exe`),
+			filepath.Join(localApp, `Microsoft\Edge\Application\msedge.exe`),
+			filepath.Join(localApp, `Chromium\Application\chrome.exe`),
+			filepath.Join(localApp, `BraveSoftware\Brave-Browser\Application\brave.exe`),
+			filepath.Join(localApp, `Vivaldi\Application\vivaldi.exe`),
 		}
 	}
 	return nil
@@ -854,7 +1011,7 @@ func chromiumFallbackCandidates() []string {
 // ErrNoChromiumBrowser is surfaced when bootstrap runs on a host that has
 // no Chromium-based browser installed anywhere we can find it. Never
 // triggers rod's bundled-Chromium download.
-var ErrNoChromiumBrowser = errors.New("hermai requires a Chromium-based browser (Chrome, Brave, Edge, Arc, Opera, Vivaldi, or Chromium). Install one and retry, or set HERMAI_BROWSER to the binary path")
+var ErrNoChromiumBrowser = errors.New("hermai requires a Chromium-based browser (Google Chrome, Microsoft Edge, Chromium, Brave, Arc, Opera, or Vivaldi). Install one and retry, or set HERMAI_BROWSER to the binary path")
 
 // waitForRequiredCookies polls the page until every name in required is set
 // (and, if `_abck` is among them, its value reaches Akamai's validated

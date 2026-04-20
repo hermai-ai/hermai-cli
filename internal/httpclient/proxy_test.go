@@ -14,11 +14,9 @@ import (
 )
 
 // brightDataProxyURL returns the residential-proxy URL from the
-// HERMAI_BRIGHTDATA_PROXY env var. Never hardcode a credential here — the
-// file lives in a public repo and credential strings get scraped within
-// hours of a commit. A past hardcoded value was rotated after exposure;
-// contributors who want to run these tests locally must set the env var
-// to their own BrightData residential-proxy URL:
+// HERMAI_BRIGHTDATA_PROXY env var. Credentials never belong in this
+// file — it ships in a public repo. Contributors who want to run these
+// tests locally export their own URL:
 //
 //	export HERMAI_BRIGHTDATA_PROXY='http://USER:PASS@brd.superproxy.io:33335'
 //	go test ./internal/httpclient/ -run TestStealthVsPlainViaProxy -v

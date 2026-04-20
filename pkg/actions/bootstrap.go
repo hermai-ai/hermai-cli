@@ -218,6 +218,9 @@ func BootstrapSession(ctx context.Context, req BootstrapRequest) (*BootstrapResu
 	// so the loop exits as soon as the required set is satisfied.
 	humanizeCtx, cancelHumanize := context.WithCancel(navCtx)
 	defer cancelHumanize()
+	// Fire-and-forget goroutine: exits when humanizeCtx is canceled, all
+	// CDP errors inside are swallowed by design. No WaitGroup — the defer
+	// cancel() above guarantees it stops before the browser is closed.
 	go humanizePage(humanizeCtx, page)
 
 	// Poll for required_cookies with a short backoff. Most schemas set their
@@ -421,124 +424,371 @@ func defaultChromiumBinary() string {
 }
 
 // defaultChromiumBinaryDarwin reads LaunchServices's https handler bundle ID
-// from the secure preferences plist and maps it to an on-disk app binary.
-// Keys match what the `defaults read` CLI reports, so behavior is consistent
-// with how System Settings > Default Web Browser displays the user's choice.
+// from the secure preferences plist, resolves the app bundle location via
+// `mdfind kMDItemCFBundleIdentifier == '<bundle>'` (which finds the app
+// wherever it lives — /Applications, ~/Applications, external volumes),
+// then reads CFBundleExecutable from Info.plist to get the inner binary
+// name. Falls back to the conventional "Contents/MacOS/<app-name>" when
+// Info.plist can't be parsed.
+//
+// This replaces a hardcoded bundle-ID → path map because the map missed
+// user-local installs under ~/Applications, non-default Homebrew cask
+// locations, and anything the user moved manually.
 func defaultChromiumBinaryDarwin() string {
-	out, err := exec.Command("defaults", "read",
-		filepath.Join(os.Getenv("HOME"), "Library", "Preferences", "com.apple.LaunchServices", "com.apple.launchservices.secure"),
-		"LSHandlers").Output()
+	bundleID := readDarwinHTTPSHandlerBundleID()
+	if bundleID == "" {
+		return ""
+	}
+	if !isChromiumBundleID(bundleID) {
+		return "" // Safari / Firefox / unknown — fall through to candidate list
+	}
+	appPath := findDarwinAppByBundleID(bundleID)
+	if appPath == "" {
+		return ""
+	}
+	return darwinAppBinary(appPath)
+}
+
+// readDarwinHTTPSHandlerBundleID returns the bundle ID of the app that
+// currently handles https URLs according to LaunchServices. Uses plutil
+// to convert the plist to JSON so we can parse it with encoding/json
+// instead of regexing the indented `defaults read` textual format — the
+// latter gets fooled by nested LSHandlerPreferredVersions blocks that
+// contain their own LSHandlerRoleAll keys (placeholder values like "-"
+// for "no preferred version"). Empty string means no explicit handler
+// (macOS default is Safari in that case, and we fall through to the
+// candidate list).
+func readDarwinHTTPSHandlerBundleID() string {
+	plistPath := filepath.Join(os.Getenv("HOME"), "Library", "Preferences", "com.apple.LaunchServices", "com.apple.launchservices.secure.plist")
+	out, err := exec.Command("plutil", "-convert", "json", "-o", "-", plistPath).Output()
 	if err != nil {
 		return ""
 	}
-	// The plist is a list of blocks. Find the block whose URLScheme is https
-	// and grab its RoleAll bundle ID. Using string scanning avoids a plist
-	// parsing dependency for a stable, well-documented format.
-	lines := strings.Split(string(out), "\n")
-	for i, line := range lines {
-		if !strings.Contains(line, "LSHandlerURLScheme = https") {
+	var parsed struct {
+		LSHandlers []struct {
+			LSHandlerRoleAll   string `json:"LSHandlerRoleAll"`
+			LSHandlerURLScheme string `json:"LSHandlerURLScheme"`
+		} `json:"LSHandlers"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return ""
+	}
+	for _, h := range parsed.LSHandlers {
+		if h.LSHandlerURLScheme == "https" && h.LSHandlerRoleAll != "" && h.LSHandlerRoleAll != "-" {
+			return h.LSHandlerRoleAll
+		}
+	}
+	return ""
+}
+
+// findDarwinAppByBundleID asks Spotlight for the on-disk location of the
+// app with the given bundle identifier. Returns the first result, or ""
+// if mdfind isn't installed / returns nothing.
+//
+// The trailing `c` modifier (mdfind query language — not NSPredicate) makes
+// the comparison case-insensitive. LaunchServices records lowercase bundle
+// IDs (`com.brave.browser`) while the app's own Info.plist may have mixed
+// case (`com.brave.Browser`); without the modifier the lookup silently
+// returns nothing. Bundle IDs with double quotes are stripped defensively,
+// though no known Chromium-family ID contains one.
+func findDarwinAppByBundleID(bundleID string) string {
+	safe := strings.ReplaceAll(bundleID, `"`, ``)
+	out, err := exec.Command("mdfind", fmt.Sprintf(`kMDItemCFBundleIdentifier == "%s"c`, safe)).Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasSuffix(line, ".app") {
+			if _, err := os.Stat(line); err == nil {
+				return line
+			}
+		}
+	}
+	return ""
+}
+
+// darwinAppBinary returns the absolute path to an .app bundle's inner
+// Mach-O executable. Tries CFBundleExecutable from Info.plist first; if
+// that read fails, falls back to the conventional MacOS/<app-name>
+// which holds for every Chromium-family browser we've seen.
+func darwinAppBinary(appPath string) string {
+	out, err := exec.Command("defaults", "read",
+		filepath.Join(appPath, "Contents", "Info.plist"),
+		"CFBundleExecutable").Output()
+	if err == nil {
+		if name := strings.TrimSpace(string(out)); name != "" {
+			path := filepath.Join(appPath, "Contents", "MacOS", name)
+			if _, err := os.Stat(path); err == nil {
+				return path
+			}
+		}
+	}
+	base := strings.TrimSuffix(filepath.Base(appPath), ".app")
+	path := filepath.Join(appPath, "Contents", "MacOS", base)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	return ""
+}
+
+// isChromiumBundleID returns true for Chromium-family macOS bundle IDs.
+// Safari, Firefox, LibreWolf etc. return false so caller can fall through
+// to the candidate list rather than trying to drive a non-CDP browser.
+// Comparison is case-insensitive — LaunchServices and the apps' own
+// Info.plist don't always agree on capitalization (seen in practice:
+// LS records `com.brave.browser`, Info.plist has `com.brave.Browser`).
+func isChromiumBundleID(id string) bool {
+	switch strings.ToLower(id) {
+	case "com.google.chrome",
+		"com.google.chrome.beta",
+		"com.google.chrome.dev",
+		"com.google.chrome.canary",
+		"com.brave.browser",
+		"com.brave.browser.beta",
+		"com.brave.browser.nightly",
+		"com.microsoft.edgemac",
+		"com.microsoft.edgemac.beta",
+		"com.microsoft.edgemac.dev",
+		"company.thebrowser.browser",
+		"com.operasoftware.opera",
+		"com.operasoftware.operagx",
+		"com.vivaldi.vivaldi",
+		"org.chromium.chromium":
+		return true
+	}
+	return false
+}
+
+// defaultChromiumBinaryLinux resolves the user's default browser via
+// xdg-mime (the same call `default-browser` uses), reads the resulting
+// .desktop file from the user / system application dirs, parses its
+// Exec= line, and returns the binary path if it looks Chromium-family.
+//
+// This replaces a hardcoded desktop-file-name → binary map because the
+// map missed Flatpak / Snap installs whose .desktop files carry quite
+// different Exec= strings (`/var/lib/flatpak/.../brave`) and also missed
+// browsers installed under ~/.local/share/applications.
+func defaultChromiumBinaryLinux() string {
+	out, err := exec.Command("xdg-mime", "query", "default", "x-scheme-handler/https").Output()
+	if err != nil || strings.TrimSpace(string(out)) == "" {
+		// Older xdg-utils don't support scheme queries; fall back to the
+		// generic default-web-browser setting which returns the same sort
+		// of .desktop file name on most distros.
+		out, err = exec.Command("xdg-settings", "get", "default-web-browser").Output()
+		if err != nil {
+			return ""
+		}
+	}
+	desktopFile := strings.TrimSpace(string(out))
+	if desktopFile == "" {
+		return ""
+	}
+	for _, dir := range linuxApplicationDirs() {
+		data, err := os.ReadFile(filepath.Join(dir, desktopFile))
+		if err != nil {
 			continue
 		}
-		// Role is one of the other keys in the same block — look backwards
-		// and forwards for "LSHandlerRoleAll = <bundle-id>".
-		for j := i - 4; j <= i+4 && j < len(lines); j++ {
-			if j < 0 {
+		bin := parseDesktopExec(string(data))
+		if bin == "" {
+			continue
+		}
+		if !strings.HasPrefix(bin, "/") {
+			resolved, err := exec.LookPath(bin)
+			if err != nil {
 				continue
 			}
-			if strings.Contains(lines[j], "LSHandlerRoleAll") {
-				bundleID := strings.Trim(strings.TrimSpace(strings.SplitN(lines[j], "=", 2)[1]), "\";,")
-				if path := darwinBundleIDToBinary(bundleID); path != "" {
-					return path
-				}
+			bin = resolved
+		}
+		if isChromiumBinaryName(bin) {
+			return bin
+		}
+	}
+	return ""
+}
+
+// linuxApplicationDirs returns the ordered list of directories where .desktop
+// files live on a typical Linux install, user-local first so Flatpak /
+// personal installs override system ones.
+func linuxApplicationDirs() []string {
+	home := os.Getenv("HOME")
+	dirs := []string{
+		filepath.Join(home, ".local", "share", "applications"),
+		"/usr/local/share/applications",
+		"/usr/share/applications",
+		"/var/lib/snapd/desktop/applications",
+		"/var/lib/flatpak/exports/share/applications",
+		filepath.Join(home, ".local", "share", "flatpak", "exports", "share", "applications"),
+	}
+	return dirs
+}
+
+// parseDesktopExec extracts the first token of the Exec= line in the
+// [Desktop Entry] section of a Freedesktop .desktop file. Handles quoted
+// paths (for Exec entries with spaces) and strips trailing field codes
+// (%u, %U, %f, %F, etc.) which would otherwise get glued to the path.
+// Pure function; no filesystem or exec access — tested directly.
+func parseDesktopExec(content string) string {
+	inEntry := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inEntry = trimmed == "[Desktop Entry]"
+			continue
+		}
+		if !inEntry {
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "Exec=") {
+			continue
+		}
+		cmd := strings.TrimPrefix(trimmed, "Exec=")
+		if cmd == "" {
+			return ""
+		}
+		// Quoted path: "C:\path with spaces\brave.exe" %U
+		if cmd[0] == '"' {
+			end := strings.IndexByte(cmd[1:], '"')
+			if end < 0 {
+				return ""
 			}
+			return cmd[1 : end+1]
 		}
+		// Strip field codes like %u, %U, %f, %F that follow the binary.
+		fields := strings.Fields(cmd)
+		if len(fields) == 0 {
+			return ""
+		}
+		return fields[0]
 	}
 	return ""
 }
 
-// darwinBundleIDToBinary maps a macOS bundle identifier to the canonical
-// binary path inside /Applications. The map covers every Chromium-based
-// browser the hermai team has seen installed in practice; new entries are
-// cheap to add. Returns "" for Safari, Firefox, or unknown IDs.
-func darwinBundleIDToBinary(bundleID string) string {
-	m := map[string]string{
-		"com.google.chrome":          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-		"com.brave.browser":          "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-		"com.microsoft.edgemac":      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-		"company.thebrowser.browser": "/Applications/Arc.app/Contents/MacOS/Arc",
-		"com.operasoftware.opera":    "/Applications/Opera.app/Contents/MacOS/Opera",
-		"com.vivaldi.vivaldi":        "/Applications/Vivaldi.app/Contents/MacOS/Vivaldi",
-		"org.chromium.chromium":      "/Applications/Chromium.app/Contents/MacOS/Chromium",
-	}
-	if p, ok := m[bundleID]; ok {
-		if _, err := os.Stat(p); err == nil {
-			return p
+// isChromiumBinaryName returns true when the basename of the path matches
+// a known Chromium-family binary. Guards against xdg-mime happily pointing
+// us at Firefox / LibreWolf on systems where the user reset their default.
+func isChromiumBinaryName(binPath string) bool {
+	base := strings.ToLower(filepath.Base(binPath))
+	for _, needle := range []string{
+		"brave", "google-chrome", "chrome", "chromium",
+		"microsoft-edge", "msedge", "edge",
+		"opera", "vivaldi", "arc",
+	} {
+		if strings.Contains(base, needle) {
+			return true
 		}
 	}
-	return ""
+	return false
 }
 
-// defaultChromiumBinaryLinux reads xdg-settings's default-web-browser, which
-// returns a .desktop file name like "brave-browser.desktop". The map below
-// covers the common distro names; anything else falls through to the ordered
-// fallback search.
-func defaultChromiumBinaryLinux() string {
-	out, err := exec.Command("xdg-settings", "get", "default-web-browser").Output()
-	if err != nil {
+// defaultChromiumBinaryWindows resolves the user's default https handler
+// from the UserChoice registry key, then follows the ProgID's
+// `shell\open\command` entry to the actual registered binary path — the
+// same chain Explorer walks when you click a link. This handles per-user
+// MSI installs, %LOCALAPPDATA% installs, and any location the browser's
+// installer registered, without hardcoded Program Files guesses.
+func defaultChromiumBinaryWindows() string {
+	progID := readWindowsProgID()
+	if progID == "" {
 		return ""
 	}
-	desktop := strings.TrimSpace(string(out))
-	m := map[string][]string{
-		"brave-browser.desktop":  {"brave-browser", "brave"},
-		"google-chrome.desktop":  {"google-chrome", "google-chrome-stable"},
-		"microsoft-edge.desktop": {"microsoft-edge", "microsoft-edge-stable"},
-		"chromium.desktop":       {"chromium", "chromium-browser"},
-		"opera.desktop":          {"opera"},
-		"vivaldi.desktop":        {"vivaldi", "vivaldi-stable"},
+	cmd := readWindowsShellOpenCommand(progID)
+	bin := extractExeFromShellOpenCommand(cmd)
+	if bin == "" {
+		return ""
 	}
-	if bins, ok := m[desktop]; ok {
-		for _, bin := range bins {
-			if p, err := exec.LookPath(bin); err == nil {
-				return p
-			}
-		}
+	bin = expandWindowsEnvVars(bin)
+	if !isChromiumBinaryName(bin) {
+		return ""
 	}
-	return ""
+	if _, err := os.Stat(bin); err != nil {
+		return ""
+	}
+	return bin
 }
 
-// defaultChromiumBinaryWindows reads the UserChoice registry key for https,
-// maps ProgId to a known Chromium-family install path. Registry queries are
-// cheap and don't require elevated permissions.
-func defaultChromiumBinaryWindows() string {
+// readWindowsProgID reads the https-URL user-choice ProgID from the
+// registry. Returns "" if the key is missing (Windows hasn't recorded a
+// user choice yet, or an IT policy locks it down).
+func readWindowsProgID() string {
 	out, err := exec.Command("reg", "query",
 		`HKCU\SOFTWARE\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice`,
 		"/v", "ProgId").Output()
 	if err != nil {
 		return ""
 	}
-	progID := ""
 	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, "ProgId") {
-			fields := strings.Fields(line)
-			if len(fields) > 0 {
-				progID = fields[len(fields)-1]
-			}
-		}
-	}
-	m := map[string]string{
-		"ChromeHTML":     `C:\Program Files\Google\Chrome\Application\chrome.exe`,
-		"BraveHTML":      `C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe`,
-		"MSEdgeHTM":      `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
-		"OperaStable":    `C:\Program Files\Opera\launcher.exe`,
-		"VivaldiHTML":    `C:\Users\%USERNAME%\AppData\Local\Vivaldi\Application\vivaldi.exe`,
-		"ChromiumHTM.F7": `C:\Program Files\Chromium\Application\chrome.exe`,
-	}
-	if p, ok := m[progID]; ok {
-		if _, err := os.Stat(p); err == nil {
-			return p
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) >= 3 && fields[0] == "ProgId" {
+			return fields[len(fields)-1]
 		}
 	}
 	return ""
+}
+
+// readWindowsShellOpenCommand returns the raw command-line string the
+// given ProgID registers for the "open" verb. Typical content:
+//
+//	"C:\Program Files\Google\Chrome\Application\chrome.exe" --single-argument %1
+func readWindowsShellOpenCommand(progID string) string {
+	out, err := exec.Command("reg", "query",
+		fmt.Sprintf(`HKCR\%s\shell\open\command`, progID), "/ve").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		idx := strings.Index(line, "REG_SZ")
+		if idx < 0 {
+			continue
+		}
+		return strings.TrimSpace(line[idx+len("REG_SZ"):])
+	}
+	return ""
+}
+
+// extractExeFromShellOpenCommand parses a Windows registry `open` command
+// string and returns the leading executable path. Pure function — no
+// filesystem access; tests exercise it directly.
+func extractExeFromShellOpenCommand(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return ""
+	}
+	if cmd[0] == '"' {
+		end := strings.IndexByte(cmd[1:], '"')
+		if end < 0 {
+			return ""
+		}
+		return cmd[1 : end+1]
+	}
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+// expandWindowsEnvVars replaces %VARNAME% tokens with their values. The
+// registry occasionally stores paths with environment variable references
+// — %LOCALAPPDATA%, %ProgramFiles%, etc. Missing env vars leave the
+// original token in place so the subsequent Stat fails loudly.
+func expandWindowsEnvVars(path string) string {
+	for {
+		start := strings.Index(path, "%")
+		if start < 0 {
+			return path
+		}
+		end := strings.Index(path[start+1:], "%")
+		if end < 0 {
+			return path
+		}
+		name := path[start+1 : start+1+end]
+		value := os.Getenv(name)
+		if value == "" {
+			return path // leave unexpanded; caller's Stat will fail
+		}
+		path = path[:start] + value + path[start+1+end+1:]
+	}
 }
 
 // chromiumFallbackCandidates lists every binary path we know how to find for
@@ -577,13 +827,25 @@ func chromiumFallbackCandidates() []string {
 		return out
 	case "windows":
 		home := os.Getenv("USERPROFILE")
+		localApp := os.Getenv("LOCALAPPDATA")
+		if localApp == "" && home != "" {
+			localApp = filepath.Join(home, "AppData", "Local")
+		}
 		return []string{
+			// User-local installs (MSI + per-user Chrome / Edge / Brave)
+			filepath.Join(localApp, `BraveSoftware\Brave-Browser\Application\brave.exe`),
+			filepath.Join(localApp, `Google\Chrome\Application\chrome.exe`),
+			filepath.Join(localApp, `Microsoft\Edge\Application\msedge.exe`),
+			filepath.Join(localApp, `Vivaldi\Application\vivaldi.exe`),
+			filepath.Join(localApp, `Chromium\Application\chrome.exe`),
+			// System installs
 			`C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe`,
 			`C:\Program Files\Google\Chrome\Application\chrome.exe`,
 			`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
 			`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+			`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
 			`C:\Program Files\Opera\launcher.exe`,
-			filepath.Join(home, `AppData\Local\Vivaldi\Application\vivaldi.exe`),
+			`C:\Program Files\Chromium\Application\chrome.exe`,
 		}
 	}
 	return nil

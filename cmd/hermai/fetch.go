@@ -372,6 +372,12 @@ func mergeCookiesForURL(storageDir, targetURL string, explicit []string, logger 
 	if err != nil || u.Host == "" {
 		return explicit
 	}
+	// Scheme guard: cookies only make sense for HTTP(S). A file:// or
+	// other non-web URL has no session jar to attach, and we don't want
+	// a label-walk on "localhost" or similar triggering a disk probe.
+	if s := strings.ToLower(u.Scheme); s != "http" && s != "https" {
+		return explicit
+	}
 	host := strings.ToLower(u.Hostname())
 
 	// Candidate lookup order: exact host, then progressively strip leading

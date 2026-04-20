@@ -5,12 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/go-rod/stealth"
@@ -39,16 +44,23 @@ type BootstrapRequest struct {
 	// Typically ~/.hermai/sessions. BootstrapSession writes to
 	// {StorageDir}/{Site}/cookies.json.
 	StorageDir string
+	// PersistentProfileDir is the Chrome user-data-dir to reuse across
+	// bootstraps. Empty defaults to ~/.hermai/chrome-profile. Reusing the
+	// same dir makes the browser look like a returning user to anti-bot
+	// sensors (accumulated TLS tickets, history, IndexedDB). Tests pass a
+	// temp dir to isolate state.
+	PersistentProfileDir string
 }
 
 // BootstrapResult summarizes a successful bootstrap.
 type BootstrapResult struct {
-	Site          string
-	CookieCount   int
-	RequiredFound []string // which required_cookies were actually set
-	RequiredMiss  []string // required_cookies that never appeared
-	StoragePath   string   // absolute path to the saved cookies.json
-	Duration      time.Duration
+	Site              string
+	CookieCount       int
+	RequiredFound     []string // which required_cookies were actually set
+	RequiredMiss      []string // required_cookies that never appeared
+	AkamaiUnvalidated bool     // _abck was present but never reached ~-1~ validated state
+	StoragePath       string   // absolute path to the saved cookies.json
+	Duration          time.Duration
 }
 
 // CookieFile is the persistence format for session cookies. Values are kept
@@ -66,6 +78,23 @@ type CookieFile struct {
 // call BootstrapSession with Headless=false to watch what the browser is
 // doing if this keeps firing.
 var ErrBootstrapTimeout = errors.New("bootstrap timed out waiting for required cookies")
+
+// ErrBootstrapAkamaiUnvalidated is returned when Akamai's _abck cookie was
+// set but its value never reached the validated state (`~-1~` marker). This
+// happens when the bootstrap runs headless, or headful but the user never
+// moved the mouse / clicked during the wait window — Akamai's sensor keeps
+// the cookie in "still collecting telemetry" state forever. Remedy: rerun
+// with Headless=false and interact with the window during the wait.
+var ErrBootstrapAkamaiUnvalidated = errors.New("bootstrap: _abck cookie captured but still in unvalidated state; re-run with --headful and move the mouse / click during the wait window")
+
+// akamaiValidatedPattern matches the validated form of Akamai's _abck cookie
+// value. The value has the shape "<version>~<sensor-score>~<hit-count>~...".
+// Hit count `-1` means the sensor has accepted the client as human; `0` or
+// other positive values mean telemetry is still being collected. Per-sensor
+// docs + live inspection on united.com and every other Akamai-protected
+// site confirm: without `~-1~` the cookie replays as a stale sensor and
+// the downstream API returns 403 / challenge HTML.
+var akamaiValidatedPattern = regexp.MustCompile(`~-1~`)
 
 // BootstrapSession warms a browser page at req.BootstrapURL, waits for the
 // cookies named in req.RequiredCookies to appear, then dumps every cookie
@@ -93,11 +122,65 @@ func BootstrapSession(ctx context.Context, req BootstrapRequest) (*BootstrapResu
 
 	start := time.Now()
 
-	l := launcher.New().Headless(req.Headless).Leakless(false).
-		Set("disable-blink-features", "AutomationControlled")
-	if req.BrowserPath != "" {
-		l = l.Bin(req.BrowserPath)
+	// Pivot from rod's bundled Chromium + ephemeral temp profile to the
+	// user's real Chrome binary + a persistent user-data-dir. Rationale:
+	//
+	// Anti-bot sensors (Akamai Bot Manager Premier, DataDome HUMAN,
+	// PerimeterX HUMAN) fingerprint the browser process they see: Chrome
+	// version, TLS session tickets, storage state, browsing history depth,
+	// and a handful of canvas / WebGL signals. Launching ephemeral
+	// `HeadlessChrome` with zero history fails the "returning user" check
+	// on the very first frame — which is why CDP-level mouse humanization
+	// can't recover the session. By contrast, spawning the user's own
+	// installed Chrome with a persistent profile means that after a few
+	// bootstraps the profile has real TLS resumption data, indexeddb
+	// content, and navigation history that sensors treat as normal.
+	//
+	// This matches bb-browser's approach (packages/cli/src/cdp-discovery.ts
+	// `launchManagedBrowser`): find the system Chrome, point at a persistent
+	// dir under the tool's home, and attach. The only difference is we still
+	// terminate the browser at end of bootstrap — keeping it alive between
+	// invocations is a future optimization.
+	persistentDir := req.PersistentProfileDir
+	if persistentDir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			persistentDir = filepath.Join(home, ".hermai", "chrome-profile")
+		}
 	}
+	if persistentDir != "" {
+		if err := os.MkdirAll(persistentDir, 0700); err != nil {
+			return nil, fmt.Errorf("bootstrap: prepare persistent profile dir %s: %w", persistentDir, err)
+		}
+	}
+
+	chromeBin := req.BrowserPath
+	if chromeBin == "" {
+		if env := strings.TrimSpace(os.Getenv("HERMAI_BROWSER")); env != "" {
+			chromeBin = env
+		}
+	}
+	if chromeBin == "" {
+		chromeBin = findSystemChromiumBinary()
+	}
+	if chromeBin == "" {
+		return nil, ErrNoChromiumBrowser
+	}
+
+	l := launcher.New().Headless(req.Headless).Leakless(false).
+		Set("disable-blink-features", "AutomationControlled").
+		// Suppress the "Chrome is being controlled by automated test software"
+		// infobar so the window looks like a normal Chrome startup to both
+		// anti-bot scripts and any curious user watching the bootstrap.
+		Set("disable-infobars").
+		Set("no-first-run").
+		Set("no-default-browser-check")
+	if chromeBin != "" {
+		l = l.Bin(chromeBin)
+	}
+	if persistentDir != "" {
+		l = l.UserDataDir(persistentDir)
+	}
+
 	controlURL, err := l.Launch()
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap: launch browser: %w", err)
@@ -127,15 +210,36 @@ func BootstrapSession(ctx context.Context, req BootstrapRequest) (*BootstrapResu
 	// Wait for DOM to stabilize so anti-bot scripts finish their cookie writes.
 	_ = page.WaitStable(3 * time.Second)
 
+	// Drive mouse jitter, scroll, and click sequences in a goroutine so anti-bot
+	// sensors (Akamai _abck, DataDome, PerimeterX) receive the behavioral
+	// telemetry they require to validate the session. Without this the sensor
+	// score stays in "still collecting" state forever and the cookie the caller
+	// replays downstream returns 403. Runs concurrently with the cookie poll
+	// so the loop exits as soon as the required set is satisfied.
+	humanizeCtx, cancelHumanize := context.WithCancel(navCtx)
+	defer cancelHumanize()
+	// Fire-and-forget goroutine: exits when humanizeCtx is canceled, all
+	// CDP errors inside are swallowed by design. No WaitGroup — the defer
+	// cancel() above guarantees it stops before the browser is closed.
+	go humanizePage(humanizeCtx, page)
+
 	// Poll for required_cookies with a short backoff. Most schemas set their
 	// cookies in the first 1-5 seconds; harder ones (webmssdk, PerimeterX) can
-	// take up to 20 seconds. Give up at req.Timeout.
-	found, missing := waitForRequiredCookies(navCtx, page, req.RequiredCookies, req.Timeout)
+	// take up to 20 seconds. Give up at req.Timeout. Also watch for Akamai's
+	// `_abck` cookie to reach validated state — name-only checks pass while
+	// the value is still an unvalidated sensor, which then fails downstream.
+	found, missing, akamaiUnvalidated := waitForRequiredCookies(navCtx, page, req.RequiredCookies, req.Timeout)
+	cancelHumanize()
 
 	// Dump the full cookie jar regardless of whether all required cookies
-	// appeared — even a partial set is often useful for debugging, and
-	// downstream tls-clients can replay what we got.
-	allCookies, err := proto.NetworkGetAllCookies{}.Call(page)
+	// appeared — even a partial set is useful for debugging, and downstream
+	// tls-clients can replay what we got. Use a fresh short-lived context
+	// for this read: navCtx may have expired during the required-cookie
+	// poll, and the page.Context(navCtx) binding would make NetworkGetAllCookies
+	// fail with "context deadline exceeded" and lose the partial jar.
+	readCtx, cancelRead := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelRead()
+	allCookies, err := proto.NetworkGetAllCookies{}.Call(page.Context(readCtx))
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap: read cookies: %w", err)
 	}
@@ -170,28 +274,769 @@ func BootstrapSession(ctx context.Context, req BootstrapRequest) (*BootstrapResu
 	}
 
 	res := &BootstrapResult{
-		Site:          req.Site,
-		CookieCount:   len(cookies),
-		RequiredFound: found,
-		RequiredMiss:  missing,
-		StoragePath:   storagePath,
-		Duration:      time.Since(start),
+		Site:              req.Site,
+		CookieCount:       len(cookies),
+		RequiredFound:     found,
+		RequiredMiss:      missing,
+		AkamaiUnvalidated: akamaiUnvalidated,
+		StoragePath:       storagePath,
+		Duration:          time.Since(start),
 	}
 	if len(missing) > 0 && len(req.RequiredCookies) > 0 {
-		return res, fmt.Errorf("%w: missing %v", ErrBootstrapTimeout, missing)
+		return res, fmt.Errorf("%w: missing %v (captured %d of %d required; try --headful + move the mouse / click during the wait window for Akamai/PerimeterX/Kasada sites)",
+			ErrBootstrapTimeout, missing, len(found), len(req.RequiredCookies))
+	}
+	if akamaiUnvalidated {
+		return res, ErrBootstrapAkamaiUnvalidated
 	}
 	return res, nil
 }
 
-// waitForRequiredCookies polls the page until every name in required is set,
-// or the context deadline fires. Returns the two disjoint sets.
-func waitForRequiredCookies(ctx context.Context, page *rod.Page, required []string, timeout time.Duration) (found, missing []string) {
+// humanizePage runs until ctx is canceled, continuously simulating the mouse
+// movement, scrolling, and click telemetry that anti-bot sensors (Akamai,
+// DataDome, PerimeterX, Kasada) require before flipping their cookies into
+// validated state. Headless Chrome by default produces zero mouse/scroll
+// events after navigation, so these sensors keep the session unvalidated
+// indefinitely — this routine closes that gap without asking the user to
+// move their mouse. All errors are swallowed: a failed movement doesn't
+// halt bootstrap, and some page states (detached frame, navigation in
+// flight) make the CDP calls transiently fail.
+//
+// The movement pattern is deliberately crude: a small number of random
+// points inside a standard 1280x800 viewport, with sleeps in the 150-450ms
+// range. Sophisticated sensors also look at trajectory curvature and
+// event-timing jitter, but for the common anti-bot scripts on our 65
+// session-gated schemas the baseline telemetry is what we need.
+func humanizePage(ctx context.Context, page *rod.Page) {
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	viewportW, viewportH := 1280.0, 800.0
+	x, y := viewportW/2, viewportH/2
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		action := r.Intn(10)
+		switch {
+		case action < 6:
+			// Mouse move — small steps so the trajectory looks human, not
+			// a straight teleport. Sensor scripts track the number of
+			// mousemove events, not just the final position.
+			targetX := clampFloat(x+float64(r.Intn(400)-200), 0, viewportW)
+			targetY := clampFloat(y+float64(r.Intn(300)-150), 0, viewportH)
+			steps := 4 + r.Intn(6)
+			for i := 1; i <= steps; i++ {
+				if ctx.Err() != nil {
+					return
+				}
+				px := x + (targetX-x)*float64(i)/float64(steps)
+				py := y + (targetY-y)*float64(i)/float64(steps)
+				_ = page.Mouse.MoveTo(proto.NewPoint(px, py))
+				sleepCtx(ctx, time.Duration(20+r.Intn(40))*time.Millisecond)
+			}
+			x, y = targetX, targetY
+		case action < 9:
+			// Scroll. ScrollWheel's (x, y) are the origin point; (dx, dy)
+			// are the deltas. Keep dx=0 and dy in the 100-400px range so
+			// we mimic a few wheel ticks rather than a continuous drag.
+			dy := float64(80 + r.Intn(320))
+			if r.Intn(4) == 0 {
+				dy = -dy // occasional scroll up so the pattern isn't monotonic
+			}
+			_ = page.Mouse.Scroll(0, dy, 1)
+			sleepCtx(ctx, time.Duration(150+r.Intn(300))*time.Millisecond)
+		default:
+			// Rare benign click on the current mouse position. Useful for
+			// press-and-hold style sensors; harmless on a page's background.
+			_ = page.Mouse.Down(proto.InputMouseButtonLeft, 1)
+			sleepCtx(ctx, time.Duration(40+r.Intn(80))*time.Millisecond)
+			_ = page.Mouse.Up(proto.InputMouseButtonLeft, 1)
+			sleepCtx(ctx, time.Duration(100+r.Intn(200))*time.Millisecond)
+		}
+	}
+}
+
+// sleepCtx sleeps up to d but returns early if ctx is canceled.
+func sleepCtx(ctx context.Context, d time.Duration) {
+	select {
+	case <-ctx.Done():
+	case <-time.After(d):
+	}
+}
+
+// clampFloat confines v to [lo, hi]. Keeps simulated mouse coordinates
+// inside the viewport so CDP doesn't reject the move.
+func clampFloat(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// Suppress unused-import lints on the input package. Rod uses it for
+// keyboard dispatch which future-humanize extensions may need.
+var _ = input.Tab
+
+// findSystemChromiumBinary returns the binary path of a Chromium-based browser
+// installed on this host, preferring the user's OS-default browser if it is
+// Chromium-family (Brave, Edge, Arc, Chrome, Chromium, Opera, Vivaldi). Falls
+// back to a per-OS ordered search if the default can't be read or isn't
+// Chromium. Returns an empty string if no Chromium-family browser is found —
+// caller must surface a user-facing error rather than downloading anything.
+//
+// Why not just Chrome: users run Brave, Edge, Arc, etc. daily. The TLS/JA3
+// fingerprint + user-agent + version of whatever browser they use all day is
+// what anti-bot sensors expect from this host; forcing a different binary
+// actually makes detection WORSE. This matches bb-browser's philosophy:
+// "your browser is the API."
+//
+// Why not Firefox/Safari: they don't speak CDP — rod and every other
+// automation library in the ecosystem relies on Chrome DevTools Protocol.
+func findSystemChromiumBinary() string {
+	if def := defaultChromiumBinary(); def != "" {
+		return def
+	}
+	for _, p := range chromiumFallbackCandidates() {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// defaultChromiumBinary reads the OS-level default browser setting and, if the
+// default is a Chromium-based browser we recognize, returns its binary path.
+// Returns "" when the default is Safari/Firefox/unknown — caller falls back
+// to the ordered candidate list.
+func defaultChromiumBinary() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return defaultChromiumBinaryDarwin()
+	case "linux":
+		return defaultChromiumBinaryLinux()
+	case "windows":
+		return defaultChromiumBinaryWindows()
+	}
+	return ""
+}
+
+// defaultChromiumBinaryDarwin reads LaunchServices's https handler bundle ID
+// from the secure preferences plist, resolves the app bundle location via
+// `mdfind kMDItemCFBundleIdentifier == '<bundle>'` (which finds the app
+// wherever it lives — /Applications, ~/Applications, external volumes),
+// then reads CFBundleExecutable from Info.plist to get the inner binary
+// name. Falls back to the conventional "Contents/MacOS/<app-name>" when
+// Info.plist can't be parsed.
+//
+// This replaces a hardcoded bundle-ID → path map because the map missed
+// user-local installs under ~/Applications, non-default Homebrew cask
+// locations, and anything the user moved manually.
+func defaultChromiumBinaryDarwin() string {
+	bundleID := readDarwinHTTPSHandlerBundleID()
+	if bundleID == "" {
+		return ""
+	}
+	if !isChromiumBundleID(bundleID) {
+		return "" // Safari / Firefox / unknown — fall through to candidate list
+	}
+	appPath := findDarwinAppByBundleID(bundleID)
+	if appPath == "" {
+		return ""
+	}
+	return darwinAppBinary(appPath)
+}
+
+// readDarwinHTTPSHandlerBundleID returns the bundle ID of the app that
+// currently handles https URLs according to LaunchServices. Uses plutil
+// to convert the plist to JSON so we can parse it with encoding/json
+// instead of regexing the indented `defaults read` textual format — the
+// latter gets fooled by nested LSHandlerPreferredVersions blocks that
+// contain their own LSHandlerRoleAll keys (placeholder values like "-"
+// for "no preferred version"). Empty string means no explicit handler
+// (macOS default is Safari in that case, and we fall through to the
+// candidate list).
+func readDarwinHTTPSHandlerBundleID() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	plistPath := filepath.Join(home, "Library", "Preferences", "com.apple.LaunchServices", "com.apple.launchservices.secure.plist")
+	out, err := exec.Command("plutil", "-convert", "json", "-o", "-", plistPath).Output()
+	if err != nil {
+		return ""
+	}
+	var parsed struct {
+		LSHandlers []struct {
+			LSHandlerRoleAll   string `json:"LSHandlerRoleAll"`
+			LSHandlerURLScheme string `json:"LSHandlerURLScheme"`
+		} `json:"LSHandlers"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return ""
+	}
+	for _, h := range parsed.LSHandlers {
+		if h.LSHandlerURLScheme == "https" && h.LSHandlerRoleAll != "" && h.LSHandlerRoleAll != "-" {
+			return h.LSHandlerRoleAll
+		}
+	}
+	return ""
+}
+
+// findDarwinAppByBundleID asks Spotlight for the on-disk location of the
+// app with the given bundle identifier. Returns the first result, or ""
+// if mdfind isn't installed / returns nothing.
+//
+// The trailing `c` modifier (mdfind query language — not NSPredicate) makes
+// the comparison case-insensitive. LaunchServices records lowercase bundle
+// IDs (`com.brave.browser`) while the app's own Info.plist may have mixed
+// case (`com.brave.Browser`); without the modifier the lookup silently
+// returns nothing. Bundle IDs with double quotes are stripped defensively,
+// though no known Chromium-family ID contains one.
+func findDarwinAppByBundleID(bundleID string) string {
+	safe := strings.ReplaceAll(bundleID, `"`, ``)
+	out, err := exec.Command("mdfind", fmt.Sprintf(`kMDItemCFBundleIdentifier == "%s"c`, safe)).Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasSuffix(line, ".app") {
+			if _, err := os.Stat(line); err == nil {
+				return line
+			}
+		}
+	}
+	return ""
+}
+
+// darwinAppBinary returns the absolute path to an .app bundle's inner
+// Mach-O executable. Tries CFBundleExecutable from Info.plist first; if
+// that read fails, falls back to the conventional MacOS/<app-name>
+// which holds for every Chromium-family browser we've seen.
+func darwinAppBinary(appPath string) string {
+	out, err := exec.Command("defaults", "read",
+		filepath.Join(appPath, "Contents", "Info.plist"),
+		"CFBundleExecutable").Output()
+	if err == nil {
+		if name := strings.TrimSpace(string(out)); name != "" {
+			path := filepath.Join(appPath, "Contents", "MacOS", name)
+			if _, err := os.Stat(path); err == nil {
+				return path
+			}
+		}
+	}
+	base := strings.TrimSuffix(filepath.Base(appPath), ".app")
+	path := filepath.Join(appPath, "Contents", "MacOS", base)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	return ""
+}
+
+// isChromiumBundleID returns true for Chromium-family macOS bundle IDs.
+// Safari, Firefox, LibreWolf etc. return false so caller can fall through
+// to the candidate list rather than trying to drive a non-CDP browser.
+// Comparison is case-insensitive — LaunchServices and the apps' own
+// Info.plist don't always agree on capitalization (seen in practice:
+// LS records `com.brave.browser`, Info.plist has `com.brave.Browser`).
+func isChromiumBundleID(id string) bool {
+	switch strings.ToLower(id) {
+	case "com.google.chrome",
+		"com.google.chrome.beta",
+		"com.google.chrome.dev",
+		"com.google.chrome.canary",
+		"com.brave.browser",
+		"com.brave.browser.beta",
+		"com.brave.browser.nightly",
+		"com.microsoft.edgemac",
+		"com.microsoft.edgemac.beta",
+		"com.microsoft.edgemac.dev",
+		"company.thebrowser.browser",
+		"com.operasoftware.opera",
+		"com.operasoftware.operagx",
+		"com.vivaldi.vivaldi",
+		"org.chromium.chromium":
+		return true
+	}
+	return false
+}
+
+// defaultChromiumBinaryLinux resolves the user's default browser via
+// xdg-mime, reads the resulting .desktop file from the user / system
+// application dirs, parses its Exec= line, and returns the binary path
+// if it looks Chromium-family. Handles native binaries, Snap wrappers
+// (Exec=`snap run brave`), and Flatpak wrappers (Exec=`/usr/bin/flatpak
+// run --branch=stable com.brave.Browser`) — the last two show up as
+// wrapper commands and need a second step to resolve to something that
+// rod / CDP can actually launch.
+func defaultChromiumBinaryLinux() string {
+	out, err := exec.Command("xdg-mime", "query", "default", "x-scheme-handler/https").Output()
+	if err != nil || strings.TrimSpace(string(out)) == "" {
+		// Older xdg-utils don't support scheme queries; fall back to the
+		// generic default-web-browser setting which returns the same sort
+		// of .desktop file name on most distros.
+		out, err = exec.Command("xdg-settings", "get", "default-web-browser").Output()
+		if err != nil {
+			return ""
+		}
+	}
+	desktopFile := strings.TrimSpace(string(out))
+	if desktopFile == "" {
+		return ""
+	}
+	for _, dir := range linuxApplicationDirs() {
+		data, err := os.ReadFile(filepath.Join(dir, desktopFile))
+		if err != nil {
+			continue
+		}
+		execLine := parseDesktopExec(string(data))
+		if execLine == "" {
+			continue
+		}
+		bin := resolveLinuxExecBinary(execLine)
+		if bin == "" {
+			continue
+		}
+		if !strings.HasPrefix(bin, "/") {
+			resolved, err := exec.LookPath(bin)
+			if err != nil {
+				continue
+			}
+			bin = resolved
+		}
+		if isChromiumBinaryName(bin) {
+			return bin
+		}
+	}
+	return ""
+}
+
+// resolveLinuxExecBinary turns a raw .desktop Exec= value into an actual
+// launchable browser binary path. For the common case it's just the
+// first token. For sandbox wrappers (flatpak / snap) it peeks at the
+// full argv to extract the bundle ID or snap name, then returns the
+// path to the corresponding wrapper script in /var/lib/flatpak or
+// /snap/bin — which is what rod needs to spawn the browser with a
+// CDP port attached. Returns "" when the wrapper target isn't found
+// on disk.
+func resolveLinuxExecBinary(execLine string) string {
+	first := firstExecToken(execLine)
+	if first == "" {
+		return ""
+	}
+	switch filepath.Base(first) {
+	case "flatpak":
+		id := extractFlatpakBundleID(execLine)
+		if id == "" {
+			return ""
+		}
+		// System install first — matches xdg-mime's own lookup order.
+		dirs := []string{"/var/lib/flatpak/exports/bin"}
+		if home, err := os.UserHomeDir(); err == nil {
+			dirs = append(dirs, filepath.Join(home, ".local", "share", "flatpak", "exports", "bin"))
+		}
+		for _, dir := range dirs {
+			p := filepath.Join(dir, id)
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+		return ""
+	case "snap":
+		name := extractSnapName(execLine)
+		if name == "" {
+			return ""
+		}
+		p := filepath.Join("/snap/bin", name)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		return ""
+	default:
+		return first
+	}
+}
+
+// firstExecToken returns the first whitespace-separated token of a
+// .desktop Exec= value. Handles a leading double-quoted path with
+// spaces inside. Pure function — used by resolveLinuxExecBinary and
+// tested directly.
+func firstExecToken(execLine string) string {
+	cmd := strings.TrimSpace(execLine)
+	if cmd == "" {
+		return ""
+	}
+	if cmd[0] == '"' {
+		end := strings.IndexByte(cmd[1:], '"')
+		if end < 0 {
+			return ""
+		}
+		return cmd[1 : end+1]
+	}
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+// extractFlatpakBundleID scans a `flatpak run …` Exec= line for the
+// app bundle identifier (`com.brave.Browser`, `com.google.Chrome`, …).
+// Pure function — tokenizes on whitespace and accepts the first token
+// that has the shape of a 3-label-or-more reverse-DNS bundle ID:
+// [A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(\.…)? Rules out
+// flatpak's own flags (`--branch=stable`) and bare identifiers by the
+// dot count, and path-like arguments by the character-class check.
+// Returns "" when no such token is present.
+func extractFlatpakBundleID(execLine string) string {
+	for _, tok := range strings.Fields(execLine) {
+		if strings.Count(tok, ".") < 2 {
+			continue
+		}
+		valid := true
+		for _, r := range tok {
+			switch {
+			case r >= 'a' && r <= 'z':
+			case r >= 'A' && r <= 'Z':
+			case r >= '0' && r <= '9':
+			case r == '.' || r == '_' || r == '-':
+			default:
+				valid = false
+			}
+			if !valid {
+				break
+			}
+		}
+		if !valid {
+			continue
+		}
+		// Reject leading/trailing dots and empty dot-separated labels.
+		emptyLabel := false
+		for _, label := range strings.Split(tok, ".") {
+			if label == "" {
+				emptyLabel = true
+				break
+			}
+		}
+		if emptyLabel {
+			continue
+		}
+		return tok
+	}
+	return ""
+}
+
+// extractSnapName pulls the snap name out of a `snap run <name>` Exec=
+// line. Returns "" if no positional argument follows `run`. Pure function.
+func extractSnapName(execLine string) string {
+	toks := strings.Fields(execLine)
+	for i, tok := range toks {
+		if tok != "run" {
+			continue
+		}
+		// Skip any --flag=value after `run` to reach the positional name.
+		for j := i + 1; j < len(toks); j++ {
+			if !strings.HasPrefix(toks[j], "-") {
+				return toks[j]
+			}
+		}
+	}
+	return ""
+}
+
+// linuxApplicationDirs returns the ordered list of directories where .desktop
+// files live on a typical Linux install, user-local first so Flatpak /
+// personal installs override system ones.
+func linuxApplicationDirs() []string {
+	dirs := []string{}
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".local", "share", "applications"))
+	}
+	dirs = append(dirs,
+		"/usr/local/share/applications",
+		"/usr/share/applications",
+		"/var/lib/snapd/desktop/applications",
+		"/var/lib/flatpak/exports/share/applications",
+	)
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".local", "share", "flatpak", "exports", "share", "applications"))
+	}
+	return dirs
+}
+
+// parseDesktopExec returns the full Exec= value from the [Desktop Entry]
+// section of a Freedesktop .desktop file, with field codes (%u, %U, %f,
+// %F, %i, %c, %k) removed so callers get a clean argv. Returns the raw
+// argv because sandbox wrappers (flatpak / snap) need their full line
+// to extract the bundle ID or snap name — the first token alone isn't
+// enough. Pure function; no filesystem or exec access.
+func parseDesktopExec(content string) string {
+	inEntry := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inEntry = trimmed == "[Desktop Entry]"
+			continue
+		}
+		if !inEntry {
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "Exec=") {
+			continue
+		}
+		return stripDesktopFieldCodes(strings.TrimPrefix(trimmed, "Exec="))
+	}
+	return ""
+}
+
+// stripDesktopFieldCodes removes .desktop field codes (%u, %U, %f, %F,
+// %i, %c, %k) that appear as stand-alone whitespace-separated tokens.
+// Per the Freedesktop spec these are expanded by the launcher at run
+// time; we never expand them so they'd just pollute the argv.
+func stripDesktopFieldCodes(argv string) string {
+	fields := strings.Fields(argv)
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if len(f) == 2 && f[0] == '%' {
+			continue
+		}
+		out = append(out, f)
+	}
+	return strings.Join(out, " ")
+}
+
+// isChromiumBinaryName returns true when the basename of the path is a
+// known Chromium-family browser binary. Uses an exact-name allow-list
+// (case-insensitive, .exe suffix tolerated) rather than substring match
+// so we don't falsely accept `/usr/bin/research` (contains "arc"),
+// `/usr/bin/ledger` (contains "edge"), or similar neighbors. The `.app`
+// bundle names aren't handled here because the macOS flow gates on
+// bundle ID before ever calling this function.
+func isChromiumBinaryName(binPath string) bool {
+	base := strings.ToLower(filepath.Base(binPath))
+	base = strings.TrimSuffix(base, ".exe")
+	switch base {
+	case
+		"chrome",
+		"google-chrome", "google-chrome-stable", "google-chrome-beta", "google-chrome-unstable",
+		"chrome-beta", "chrome-dev", "chrome-canary", "google chrome", "google chrome beta", "google chrome dev", "google chrome canary",
+		"chromium", "chromium-browser",
+		"brave", "brave-browser", "brave-browser-stable", "brave-browser-beta", "brave-browser-nightly", "brave browser",
+		"msedge", "microsoft-edge", "microsoft-edge-stable", "microsoft-edge-beta", "microsoft-edge-dev", "microsoft edge",
+		"opera", "opera-stable", "opera-beta", "opera-developer", "opera_launcher",
+		"vivaldi", "vivaldi-stable", "vivaldi-snapshot",
+		"arc":
+		return true
+	}
+	return false
+}
+
+// defaultChromiumBinaryWindows resolves the user's default https handler
+// from the UserChoice registry key, then follows the ProgID's
+// `shell\open\command` entry to the actual registered binary path — the
+// same chain Explorer walks when you click a link. This handles per-user
+// MSI installs, %LOCALAPPDATA% installs, and any location the browser's
+// installer registered, without hardcoded Program Files guesses.
+func defaultChromiumBinaryWindows() string {
+	progID := readWindowsProgID()
+	if progID == "" {
+		return ""
+	}
+	cmd := readWindowsShellOpenCommand(progID)
+	bin := extractExeFromShellOpenCommand(cmd)
+	if bin == "" {
+		return ""
+	}
+	bin = expandWindowsEnvVars(bin)
+	if !isChromiumBinaryName(bin) {
+		return ""
+	}
+	if _, err := os.Stat(bin); err != nil {
+		return ""
+	}
+	return bin
+}
+
+// readWindowsProgID reads the https-URL user-choice ProgID from the
+// registry. Returns "" if the key is missing (Windows hasn't recorded a
+// user choice yet, or an IT policy locks it down).
+func readWindowsProgID() string {
+	out, err := exec.Command("reg", "query",
+		`HKCU\SOFTWARE\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice`,
+		"/v", "ProgId").Output()
+	if err != nil {
+		return ""
+	}
+	return parseRegSZValue(string(out), "ProgId")
+}
+
+// readWindowsShellOpenCommand returns the raw command-line string the
+// given ProgID registers for the "open" verb. Typical content:
+//
+//	"C:\Program Files\Google\Chrome\Application\chrome.exe" --single-argument %1
+//
+// Scoped to the `(Default)` line so an unusual registry dump with
+// REG_SZ strings elsewhere in its header can't fool the parser.
+func readWindowsShellOpenCommand(progID string) string {
+	out, err := exec.Command("reg", "query",
+		fmt.Sprintf(`HKCR\%s\shell\open\command`, progID), "/ve").Output()
+	if err != nil {
+		return ""
+	}
+	return parseRegSZValue(string(out), "(Default)")
+}
+
+// parseRegSZValue parses `reg query` output and returns the REG_SZ
+// value associated with the given value name. The value name sits in
+// field 0 of its line ("(Default)" for an unnamed default, or the
+// literal name string for a named value); REG_SZ sits between the
+// name and the value. Pure function — tested directly.
+func parseRegSZValue(out, valueName string) string {
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, valueName) {
+			continue
+		}
+		idx := strings.Index(trimmed, "REG_SZ")
+		if idx < 0 {
+			continue
+		}
+		return strings.TrimSpace(trimmed[idx+len("REG_SZ"):])
+	}
+	return ""
+}
+
+// extractExeFromShellOpenCommand parses a Windows registry `open` command
+// string and returns the leading executable path. Pure function — no
+// filesystem access; tests exercise it directly.
+func extractExeFromShellOpenCommand(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return ""
+	}
+	if cmd[0] == '"' {
+		end := strings.IndexByte(cmd[1:], '"')
+		if end < 0 {
+			return ""
+		}
+		return cmd[1 : end+1]
+	}
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+// expandWindowsEnvVars replaces %VARNAME% tokens with their values. The
+// registry occasionally stores paths with environment variable references
+// — %LOCALAPPDATA%, %ProgramFiles%, etc. Missing env vars leave the
+// original token in place so the subsequent Stat fails loudly.
+func expandWindowsEnvVars(path string) string {
+	for {
+		start := strings.Index(path, "%")
+		if start < 0 {
+			return path
+		}
+		end := strings.Index(path[start+1:], "%")
+		if end < 0 {
+			return path
+		}
+		name := path[start+1 : start+1+end]
+		value := os.Getenv(name)
+		if value == "" {
+			return path // leave unexpanded; caller's Stat will fail
+		}
+		path = path[:start] + value + path[start+1+end+1:]
+	}
+}
+
+// chromiumFallbackCandidates lists binary paths for Chromium-family
+// browsers on the current OS, ordered by global market share so the
+// most likely installed browser gets tried first when we can't read the
+// user's default. Chrome (~65% share) → Edge (~12%, pre-installed on
+// Windows) → Chromium (open-source build, common on dev machines) →
+// Brave → Arc (macOS only) → Opera → Vivaldi. Order only matters for
+// hosts where multiple are installed; the first one that exists wins.
+func chromiumFallbackCandidates() []string {
+	switch runtime.GOOS {
+	case "darwin":
+		return []string{
+			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+			"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+			"/Applications/Chromium.app/Contents/MacOS/Chromium",
+			"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+			"/Applications/Arc.app/Contents/MacOS/Arc",
+			"/Applications/Opera.app/Contents/MacOS/Opera",
+			"/Applications/Vivaldi.app/Contents/MacOS/Vivaldi",
+			"/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+			"/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev",
+			"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+		}
+	case "linux":
+		out := make([]string, 0, 12)
+		for _, bin := range []string{
+			"google-chrome-stable", "google-chrome",
+			"microsoft-edge-stable", "microsoft-edge",
+			"chromium", "chromium-browser",
+			"brave-browser", "brave",
+			"opera",
+			"vivaldi-stable", "vivaldi",
+		} {
+			if p, err := exec.LookPath(bin); err == nil {
+				out = append(out, p)
+			}
+		}
+		return out
+	case "windows":
+		home := os.Getenv("USERPROFILE")
+		localApp := os.Getenv("LOCALAPPDATA")
+		if localApp == "" && home != "" {
+			localApp = filepath.Join(home, "AppData", "Local")
+		}
+		return []string{
+			// System installs — Chrome / Edge ship into Program Files on default setups
+			`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+			`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+			`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+			`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
+			`C:\Program Files\Chromium\Application\chrome.exe`,
+			`C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe`,
+			`C:\Program Files\Opera\launcher.exe`,
+			// User-local installs (per-user MSI, %LOCALAPPDATA% installs)
+			filepath.Join(localApp, `Google\Chrome\Application\chrome.exe`),
+			filepath.Join(localApp, `Microsoft\Edge\Application\msedge.exe`),
+			filepath.Join(localApp, `Chromium\Application\chrome.exe`),
+			filepath.Join(localApp, `BraveSoftware\Brave-Browser\Application\brave.exe`),
+			filepath.Join(localApp, `Vivaldi\Application\vivaldi.exe`),
+		}
+	}
+	return nil
+}
+
+// ErrNoChromiumBrowser is surfaced when bootstrap runs on a host that has
+// no Chromium-based browser installed anywhere we can find it. Never
+// triggers rod's bundled-Chromium download.
+var ErrNoChromiumBrowser = errors.New("hermai requires a Chromium-based browser (Google Chrome, Microsoft Edge, Chromium, Brave, Arc, Opera, or Vivaldi). Install one and retry, or set HERMAI_BROWSER to the binary path")
+
+// waitForRequiredCookies polls the page until every name in required is set
+// (and, if `_abck` is among them, its value reaches Akamai's validated
+// `~-1~` marker) or the context deadline fires. Returns the two disjoint
+// name sets plus whether `_abck` was captured but never validated.
+func waitForRequiredCookies(ctx context.Context, page *rod.Page, required []string, timeout time.Duration) (found, missing []string, akamaiUnvalidated bool) {
 	if len(required) == 0 {
-		return nil, nil
+		return nil, nil, false
 	}
 	needed := make(map[string]struct{}, len(required))
+	wantAbck := false
 	for _, n := range required {
 		needed[n] = struct{}{}
+		if n == "_abck" {
+			wantAbck = true
+		}
 	}
 
 	deadline := time.Now().Add(timeout)
@@ -204,9 +1049,9 @@ func waitForRequiredCookies(ctx context.Context, page *rod.Page, required []stri
 			time.Sleep(300 * time.Millisecond)
 			continue
 		}
-		have := make(map[string]struct{})
+		have := make(map[string]string)
 		for _, c := range all.Cookies {
-			have[c.Name] = struct{}{}
+			have[c.Name] = c.Value
 		}
 		foundAll := true
 		for name := range needed {
@@ -215,21 +1060,24 @@ func waitForRequiredCookies(ctx context.Context, page *rod.Page, required []stri
 				break
 			}
 		}
-		if foundAll {
+		abckOK := !wantAbck || akamaiValidatedPattern.MatchString(have["_abck"])
+		if foundAll && abckOK {
 			for name := range needed {
 				found = append(found, name)
 			}
-			return found, nil
+			return found, nil, false
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	// Deadline hit — report what we saw vs what was expected.
+	// Deadline hit — report what we saw vs what was expected, and flag the
+	// Akamai-unvalidated case separately so callers can print a distinct
+	// remediation hint (re-run with --headful + human interaction).
 	all, err := proto.NetworkGetAllCookies{}.Call(page)
 	if err == nil {
-		have := make(map[string]struct{})
+		have := make(map[string]string)
 		for _, c := range all.Cookies {
-			have[c.Name] = struct{}{}
+			have[c.Name] = c.Value
 		}
 		for name := range needed {
 			if _, ok := have[name]; ok {
@@ -238,12 +1086,17 @@ func waitForRequiredCookies(ctx context.Context, page *rod.Page, required []stri
 				missing = append(missing, name)
 			}
 		}
+		if wantAbck {
+			if v, ok := have["_abck"]; ok && !akamaiValidatedPattern.MatchString(v) {
+				akamaiUnvalidated = true
+			}
+		}
 	} else {
 		for name := range needed {
 			missing = append(missing, name)
 		}
 	}
-	return found, missing
+	return found, missing, akamaiUnvalidated
 }
 
 // LoadCookieFile reads a previously-stored cookie jar for a site. Returns

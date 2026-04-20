@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -233,7 +234,16 @@ Examples:
 				if result != nil && result.CookieCount > 0 {
 					fmt.Fprintf(os.Stderr, "partial bootstrap: captured %d cookies, missing required %v -> %s\n",
 						result.CookieCount, result.RequiredMiss, result.StoragePath)
+					if result.AkamaiUnvalidated {
+						fmt.Fprintln(os.Stderr, "  _abck is present but unvalidated (`~-1~` marker missing). Akamai won't accept this jar downstream.")
+						fmt.Fprintln(os.Stderr, "  Remedy: re-run with `--headful` and physically move the mouse / click on the page during the wait window.")
+					} else if !headful {
+						fmt.Fprintln(os.Stderr, "  Remedy: re-run with `--headful` for anti-bot sites (Akamai, PerimeterX, DataDome, Kasada, Cloudflare Turnstile).")
+					}
 					return err
+				}
+				if errors.Is(err, actions.ErrBootstrapAkamaiUnvalidated) {
+					fmt.Fprintln(os.Stderr, "Akamai sensor never reached validated state. Re-run with --headful and interact with the window.")
 				}
 				return fmt.Errorf("bootstrap failed: %w", err)
 			}

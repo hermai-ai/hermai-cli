@@ -2,8 +2,10 @@ package httpclient_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -11,7 +13,19 @@ import (
 	"github.com/hermai-ai/hermai-cli/internal/httpclient"
 )
 
-const brightDataProxy = "http://brd-customer-hl_1c66eb2e-zone-residential_proxy1:9po1c5q0ga86@brd.superproxy.io:33335"
+// brightDataProxyURL returns the residential-proxy URL from the
+// HERMAI_BRIGHTDATA_PROXY env var. Credentials never belong in this
+// file — it ships in a public repo. Contributors who want to run these
+// tests locally export their own URL:
+//
+//	export HERMAI_BRIGHTDATA_PROXY='http://USER:PASS@brd.superproxy.io:33335'
+//	go test ./internal/httpclient/ -run TestStealthVsPlainViaProxy -v
+//
+// Tests skip cleanly when the env var is unset so CI stays green without
+// requiring a proxy credential in the pipeline.
+func brightDataProxyURL() string {
+	return strings.TrimSpace(os.Getenv("HERMAI_BRIGHTDATA_PROXY"))
+}
 
 // TestStealthVsPlainViaProxy tests stealth vs plain HTTP through BrightData
 // residential proxy. This is the real test: residential IP + Chrome TLS
@@ -21,6 +35,10 @@ const brightDataProxy = "http://brd-customer-hl_1c66eb2e-zone-residential_proxy1
 func TestStealthVsPlainViaProxy(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping proxy test in short mode")
+	}
+	proxyURL := brightDataProxyURL()
+	if proxyURL == "" {
+		t.Skip("HERMAI_BRIGHTDATA_PROXY not set — skipping proxy test")
 	}
 
 	targets := []struct {
@@ -56,7 +74,7 @@ func TestStealthVsPlainViaProxy(t *testing.T) {
 			defer cancel()
 
 			opts := httpclient.Options{
-				ProxyURL: brightDataProxy,
+				ProxyURL: proxyURL,
 				Insecure: true,
 				Timeout:  20 * time.Second,
 			}
@@ -91,24 +109,40 @@ func TestFingerprintViaProxy(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping proxy test in short mode")
 	}
+	proxyURL := brightDataProxyURL()
+	if proxyURL == "" {
+		t.Skip("HERMAI_BRIGHTDATA_PROXY not set — skipping proxy test")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	opts := httpclient.Options{
-		ProxyURL: brightDataProxy,
+		ProxyURL: proxyURL,
 		Insecure: true,
 		Timeout:  10 * time.Second,
 	}
 
 	plainClient := httpclient.New(opts)
-	plainFP := getTLSFingerprint(ctx, t, plainClient)
+	plainFP, err := getTLSFingerprint(ctx, plainClient)
+	if errors.Is(err, errFingerprintServiceUnavailable) {
+		t.Skipf("skipping: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("plain fingerprint: %v", err)
+	}
 
 	stealthClient, err := httpclient.NewStealth(opts)
 	if err != nil {
 		t.Fatalf("NewStealth failed: %v", err)
 	}
-	stealthFP := getTLSFingerprint(ctx, t, stealthClient)
+	stealthFP, err := getTLSFingerprint(ctx, stealthClient)
+	if errors.Is(err, errFingerprintServiceUnavailable) {
+		t.Skipf("skipping: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("stealth fingerprint: %v", err)
+	}
 
 	t.Logf("Via residential proxy:")
 	t.Logf("  Plain JA3:    %s", plainFP.ja3Hash)

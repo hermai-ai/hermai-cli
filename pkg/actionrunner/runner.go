@@ -507,10 +507,7 @@ func renderTemplate(tpl string, args, cookies map[string]string) (string, error)
 			return "", fmt.Errorf("unclosed {{ in template")
 		}
 		name := strings.TrimSpace(out[i+2 : i+j])
-		val := args[name]
-		if strings.HasPrefix(name, "cookie.") {
-			val = cookies[strings.TrimPrefix(name, "cookie.")]
-		}
+		val := resolveTemplateVar(name, args, cookies)
 		out = out[:i] + val + out[i+j+2:]
 	}
 }
@@ -558,10 +555,7 @@ func renderJSONTemplate(tpl string, args, cookies map[string]string) (string, er
 			return "", fmt.Errorf("unclosed {{ in template")
 		}
 		name, filter := parseTemplateVar(out[i+2 : i+j])
-		val := args[name]
-		if strings.HasPrefix(name, "cookie.") {
-			val = cookies[strings.TrimPrefix(name, "cookie.")]
-		}
+		val := resolveTemplateVar(name, args, cookies)
 		rendered, err := applyJSONFilter(val, filter, name)
 		if err != nil {
 			return "", err
@@ -587,12 +581,19 @@ func renderFormTemplate(tpl string, args, cookies map[string]string) (string, er
 			return "", fmt.Errorf("unclosed {{ in template")
 		}
 		name := strings.TrimSpace(out[i+2 : i+j])
-		val := args[name]
-		if strings.HasPrefix(name, "cookie.") {
-			val = cookies[strings.TrimPrefix(name, "cookie.")]
-		}
+		val := resolveTemplateVar(name, args, cookies)
 		out = out[:i] + url.QueryEscape(val) + out[i+j+2:]
 	}
+}
+
+// resolveTemplateVar returns the value for a template variable, checking
+// the cookie namespace first and falling back to args. Unknown vars
+// (and missing cookies) expand to empty string.
+func resolveTemplateVar(name string, args, cookies map[string]string) string {
+	if strings.HasPrefix(name, "cookie.") {
+		return cookies[strings.TrimPrefix(name, "cookie.")]
+	}
+	return args[name]
 }
 
 // parseTemplateVar splits a placeholder like "name|filter" into its

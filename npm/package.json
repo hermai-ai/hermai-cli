@@ -1,0 +1,45 @@
+{
+  "name": "hermai-cli",
+  "version": "0.0.0",
+  "description": "Turn any website into a structured JSON API for AI agents.",
+  "keywords": [
+    "hermai",
+    "cli",
+    "agents",
+    "scraping",
+    "api",
+    "schemas"
+  ],
+  "homepage": "https://hermai.ai",
+  "bugs": "https://github.com/hermai-ai/hermai-cli/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hermai-ai/hermai-cli.git",
+    "directory": "npm"
+  },
+  "license": "AGPL-3.0-or-later",
+  "author": "Hermai",
+  "bin": {
+    "hermai": "./bin/hermai.js"
+  },
+  "files": [
+    "bin",
+    "scripts",
+    "README.md"
+  ],
+  "scripts": {
+    "postinstall": "node ./scripts/postinstall.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}

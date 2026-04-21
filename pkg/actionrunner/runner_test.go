@@ -177,6 +177,60 @@ func TestRunner_FormEncodedBodyTemplate_NoRuntime(t *testing.T) {
 	}
 }
 
+func TestRunner_JSONBodyTemplate_UsesCookieTemplateVar(t *testing.T) {
+	var seenBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		seenBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	writeCookies(t, filepath.Join(dir, "example.com"), map[string]string{
+		"session":    "abc",
+		"csrf_token": "cookie-csrf-value",
+	})
+
+	sch := &schema.Schema{
+		Domain: "example.com",
+		Actions: []schema.Action{
+			{
+				Name:        "DraftWrite",
+				Method:      "POST",
+				URLTemplate: srv.URL + "/graphql",
+				Headers: map[string]string{
+					"Accept":       "application/json",
+					"Content-Type": "application/json",
+				},
+				BodyTemplate: `{"operation":"CreateDraft","csrf_token":"{{cookie.csrf_token}}","variables":{"input":{"title":"{{title}}"}}}`,
+				Params: []schema.ActionParam{
+					{Name: "title", In: "body", Required: true},
+				},
+			},
+		},
+	}
+
+	r, err := Run(context.Background(), Request{
+		Schema:      sch,
+		ActionName:  "DraftWrite",
+		Args:        map[string]string{"title": `hello "draft"`},
+		SessionsDir: dir,
+		HTTPClient:  srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if r.Status != 200 {
+		t.Errorf("status = %d, want 200", r.Status)
+	}
+	wantBody := `{"operation":"CreateDraft","csrf_token":"cookie-csrf-value","variables":{"input":{"title":"hello \"draft\""}}}`
+	if seenBody != wantBody {
+		t.Errorf("body = %q, want %q", seenBody, wantBody)
+	}
+}
+
 func TestRunner_SignerAugmentedURL(t *testing.T) {
 	// A signer that returns {url: augmented, headers: {}} must have its
 	// URL written back to the outgoing request — otherwise sites that
@@ -671,7 +725,7 @@ func TestRenderTemplate(t *testing.T) {
 		{"/{{path}}?q={{q}}", map[string]string{"path": "search", "q": "dogs"}, "/search?q=dogs"},
 	}
 	for _, c := range cases {
-		got, err := renderTemplate(c.tpl, c.args)
+		got, err := renderTemplate(c.tpl, c.args, nil)
 		if err != nil {
 			t.Errorf("renderTemplate(%q): unexpected error: %v", c.tpl, err)
 			continue
@@ -679,6 +733,16 @@ func TestRenderTemplate(t *testing.T) {
 		if got != c.want {
 			t.Errorf("renderTemplate(%q) = %q, want %q", c.tpl, got, c.want)
 		}
+	}
+}
+
+func TestRenderTemplate_CookieVar(t *testing.T) {
+	got, err := renderTemplate("csrf={{cookie.csrf_token}}", nil, map[string]string{"csrf_token": "cookie123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "csrf=cookie123" {
+		t.Errorf("got %q, want %q", got, "csrf=cookie123")
 	}
 }
 
@@ -691,7 +755,7 @@ func TestRenderJSONTemplate_NoFilter(t *testing.T) {
 		{`"text":"{{t}}"`, "line1\nline2", `"text":"line1\nline2"`},
 	}
 	for _, c := range cases {
-		got, err := renderJSONTemplate(c.tpl, map[string]string{"t": c.arg})
+		got, err := renderJSONTemplate(c.tpl, map[string]string{"t": c.arg}, nil)
 		if err != nil {
 			t.Errorf("arg=%q: %v", c.arg, err)
 			continue
@@ -705,7 +769,7 @@ func TestRenderJSONTemplate_NoFilter(t *testing.T) {
 func TestRenderJSONTemplate_JSONFilter(t *testing.T) {
 	// |json keeps the outer quotes — use when the placeholder is NOT
 	// already wrapped in quotes in the template.
-	got, err := renderJSONTemplate(`{"text": {{t|json}}}`, map[string]string{"t": "hello"})
+	got, err := renderJSONTemplate(`{"text": {{t|json}}}`, map[string]string{"t": "hello"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -731,7 +795,7 @@ func TestRenderJSONTemplate_JSONArrayFilter(t *testing.T) {
 		{"   ", ``},
 	}
 	for _, c := range cases {
-		got, err := renderJSONTemplate(`[{{ids|json_array}}]`, map[string]string{"ids": c.arg})
+		got, err := renderJSONTemplate(`[{{ids|json_array}}]`, map[string]string{"ids": c.arg}, nil)
 		if err != nil {
 			t.Errorf("arg=%q: %v", c.arg, err)
 			continue
@@ -744,7 +808,7 @@ func TestRenderJSONTemplate_JSONArrayFilter(t *testing.T) {
 }
 
 func TestRenderJSONTemplate_UnknownFilter(t *testing.T) {
-	_, err := renderJSONTemplate(`{{x|bogus}}`, map[string]string{"x": "v"})
+	_, err := renderJSONTemplate(`{{x|bogus}}`, map[string]string{"x": "v"}, nil)
 	if err == nil {
 		t.Fatal("expected error on unknown filter")
 	}
@@ -761,12 +825,22 @@ func TestRenderJSONTemplate_MultiFilterInOneTemplate(t *testing.T) {
 		"q":   "matte lipstick",
 		"ids": "119586,99811,40112",
 		"n":   "3",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := `{"variables":{"query":"matte lipstick","ids":["119586","99811","40112"],"count":"3"}}`
 	if got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}
+
+func TestRenderFormTemplate_CookieVar(t *testing.T) {
+	got, err := renderFormTemplate("csrf={{cookie.csrf_token}}", nil, map[string]string{"csrf_token": "cookie value"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "csrf=cookie+value" {
+		t.Errorf("got %q, want %q", got, "csrf=cookie+value")
 	}
 }

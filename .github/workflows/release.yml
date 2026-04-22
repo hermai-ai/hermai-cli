@@ -74,12 +74,17 @@ jobs:
         uses: actions/setup-node@v4
         with:
           # Node 22 LTS bundles npm 10.x. Trusted Publishing + `--provenance`
-          # require npm 11.5+, so upgrade explicitly below.
+          # require npm 11.5+, so we switch via corepack below. `npm install
+          # -g npm@latest` self-mutates mid-run and trips MODULE_NOT_FOUND
+          # (`promise-retry`) — corepack is the Node-team-blessed path.
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Upgrade npm for Trusted Publishing support
-        run: npm install -g npm@latest
+      - name: Activate npm 11 via corepack
+        run: |
+          corepack enable
+          corepack prepare npm@latest --activate
+          npm --version
 
       - name: Align package version with tag
         working-directory: npm

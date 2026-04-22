@@ -46,6 +46,33 @@ checksum:
   name_template: "checksums.txt"
   algorithm: sha256
 
+# Homebrew tap — `brew install hermai-ai/hermai/hermai` after the tap is added.
+# Requires HOMEBREW_TAP_GITHUB_TOKEN (a PAT with `repo` scope on hermai-ai/homebrew-hermai).
+# On every non-prerelease tag, goreleaser renders a fresh Formula/hermai.rb and
+# commits it to the tap repo; `brew upgrade hermai` then picks it up.
+brews:
+  - name: hermai
+    repository:
+      owner: hermai-ai
+      name: homebrew-hermai
+      branch: master
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    commit_author:
+      name: hermai-bot
+      email: bot@hermai.ai
+    commit_msg_template: "chore(tap): hermai {{ .Tag }}"
+    homepage: "https://hermai.ai"
+    description: "Turn any website into a structured JSON API for AI agents."
+    license: "AGPL-3.0-or-later"
+    # Only tag stable releases into the tap — prereleases (v0.2.0-rc1 etc.) should
+    # not shadow the user's `brew upgrade hermai` behavior.
+    skip_upload: auto
+    install: |
+      bin.install "hermai"
+    test: |
+      assert_match "hermai version", shell_output("#{bin}/hermai --version")
+
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 

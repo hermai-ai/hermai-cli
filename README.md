@@ -6,11 +6,27 @@
 
 `hermai` is the open-source CLI for the [Hermai registry](https://hermai.ai) — a community catalog of website API schemas for AI agents. Probe a site to document its endpoints, push the schema to the catalog, or pull an existing schema and call it — including authenticated writes with per-request signing.
 
+### Install
+
 ```bash
+# macOS and Linux via Homebrew
+brew install hermai-ai/hermai/hermai
+
+# Anywhere Node is installed (no Go toolchain needed)
+npm install -g hermai-cli      # or: npx hermai-cli --help
+
+# Go developers
 go install github.com/hermai-ai/hermai-cli/cmd/hermai@latest
+
+# Prebuilt binaries for every OS × arch
+# https://github.com/hermai-ai/hermai-cli/releases/latest
 ```
 
-Homebrew, npm, and prebuilt binaries coming soon.
+Already installed? Upgrade in place without re-running any of the above:
+
+```bash
+hermai update
+```
 
 ## Agent skill
 

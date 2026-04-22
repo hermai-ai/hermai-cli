@@ -7,8 +7,14 @@ on:
 
 permissions:
   contents: write
+  # OIDC token request — used both by npm Trusted Publishing (no NPM_TOKEN
+  # secret needed) and by `npm publish --provenance` to attest the artifact.
+  id-token: write
 
 jobs:
+  # Builds the multi-platform binaries, publishes the GitHub Release with
+  # tarballs + checksums, and — via the brews: block in .goreleaser.yaml —
+  # pushes an updated Formula/hermai.rb to hermai-ai/homebrew-hermai.
   goreleaser:
     runs-on: ubuntu-latest
     steps:
@@ -31,3 +37,62 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT with `repo` scope on hermai-ai/homebrew-hermai.
+          # The default GITHUB_TOKEN can't push to a sibling org repo;
+          # provision a fine-grained PAT at
+          # https://github.com/settings/tokens?type=beta and store as
+          # `HOMEBREW_TAP_GITHUB_TOKEN` in the hermai-cli repo secrets.
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+  # Publishes hermai-cli to npmjs.com via npm Trusted Publishing (OIDC) —
+  # no NPM_TOKEN secret is used or needed. The registry authenticates this
+  # job by verifying a signed GitHub OIDC token against the trusted-publisher
+  # config registered on npmjs.com for this package:
+  #
+  #   https://www.npmjs.com/package/hermai-cli/access
+  #     Publisher: GitHub Actions
+  #     Organization: hermai-ai
+  #     Repository:   hermai-cli
+  #     Workflow:     release.yml
+  #
+  # If the package does not exist yet, register the trusted publisher under
+  # your npm user settings (Trusted Publishers → Add) BEFORE the first tag —
+  # npm supports pre-publish registration, and the first `npm publish` will
+  # create the package attributed to this workflow.
+  #
+  # The wrapper is a thin postinstall-downloader that pulls the right
+  # platform binary from the GitHub release goreleaser just published,
+  # so this job runs after goreleaser succeeds.
+  npm:
+    runs-on: ubuntu-latest
+    needs: goreleaser
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Node 22 LTS bundles npm 10.x. Trusted Publishing + `--provenance`
+          # require npm 11.5+, so upgrade explicitly below.
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm for Trusted Publishing support
+        run: npm install -g npm@latest
+
+      - name: Align package version with tag
+        working-directory: npm
+        run: |
+          # Strip the leading `v` — npm versions are bare semver.
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Setting npm version to $VERSION"
+          npm version --no-git-tag-version --allow-same-version "$VERSION"
+
+      - name: Publish
+        working-directory: npm
+        # No NODE_AUTH_TOKEN env — npm 11.5+ negotiates authentication via
+        # OIDC when the workflow has `id-token: write` and npmjs.com has a
+        # matching trusted publisher entry. --provenance uses the same OIDC
+        # token to attest the artifact's origin.
+        run: npm publish --access public --provenance

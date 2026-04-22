@@ -88,4 +88,15 @@ jobs:
 
       - name: Publish
         working-directory: npm
-        run: npm publish --provenance --access public
+        run: |
+          # npm 11+ requires an explicit --tag when publishing a prerelease
+          # version (e.g. 0.3.0-rc1). Stable versions default to `latest`.
+          # The v-prefix is stripped earlier; detect the prerelease by the
+          # presence of a `-` in the version string.
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "Prerelease detected — publishing to dist-tag 'next'"
+            npm publish --provenance --access public --tag next
+          else
+            npm publish --provenance --access public
+          fi

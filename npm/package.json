@@ -20,7 +20,7 @@
   "license": "AGPL-3.0-or-later",
   "author": "Hermai",
   "bin": {
-    "hermai": "./bin/hermai.js"
+    "hermai": "bin/hermai.js"
   },
   "files": [
     "bin",

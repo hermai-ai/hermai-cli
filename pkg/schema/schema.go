@@ -113,6 +113,33 @@ type ResponseSchema struct {
 	Type   string        `json:"type"`             // "object", "array", "string", "number", "boolean"
 	Fields []FieldSchema `json:"fields,omitempty"` // for object type
 	Items  *FieldSchema  `json:"items,omitempty"`  // for array type: schema of each element
+	// HTMLList projects an HTML response into a structured list of items
+	// via CSS selectors. Used when the upstream returns a server-rendered
+	// HTML fragment (e.g. booking.com /reviewlist.html — paginated review
+	// list AJAX) and the JSONPath Fields above can't reach the data
+	// because there's no embedded SSR state to project against.
+	// When set, hermai-fetch's executor runs ItemSelector against the
+	// parsed HTML, then for each match extracts Fields[name] (selector,
+	// optional "@attr" suffix) into the output map.
+	HTMLList *HTMLListSelectors `json:"html_list,omitempty"`
+}
+
+// HTMLListSelectors describes how to project an HTML response body into
+// a JSON list of structured items. Selectors are the standard CSS subset
+// that cascadia accepts. To extract an attribute instead of text content,
+// suffix the selector with "@attr-name" (e.g. "[data-review-url]@data-review-url").
+type HTMLListSelectors struct {
+	// ItemSelector matches each item's root node (e.g.
+	// "li.review_list_new_item_block").
+	ItemSelector string `json:"item_selector"`
+	// Fields maps output JSON key → selector relative to the item root.
+	// "selector" → text content; "selector@attr" → attribute value.
+	// Empty match yields nil so callers can distinguish missing-from-page
+	// vs explicit-empty-string.
+	Fields map[string]string `json:"fields"`
+	// OutputKey is the top-level JSON key under which the projected list
+	// is returned. Defaults to "items" when empty.
+	OutputKey string `json:"output_key,omitempty"`
 }
 
 // FieldSchema describes a single field within a response object.

@@ -20,9 +20,9 @@ var (
 
 // Exit codes for machine consumption.
 const (
-	exitOK            = 0
-	exitGeneralError  = 1
-	exitAuthRequired  = 2
+	exitOK             = 0
+	exitGeneralError   = 1
+	exitAuthRequired   = 2
 	exitAnalysisFailed = 3
 )
 
@@ -31,8 +31,8 @@ func newRootCmd() *cobra.Command {
 	appversion.Version = version
 
 	root := &cobra.Command{
-		Use:     "hermai",
-		Short:   "Reverse-engineer website APIs and return structured JSON",
+		Use:   "hermai",
+		Short: "Reverse-engineer website APIs and return structured JSON",
 		Long: `Hermai is a CLI tool that discovers and documents website API endpoints
 by observing browser network traffic and producing structured JSON schemas.`,
 		Version:       version + " (" + commit + ")",
@@ -52,6 +52,7 @@ by observing browser network traffic and producing structured JSON schemas.`,
 	root.AddCommand(newProbeCmd())
 	root.AddCommand(newExtractCmd())
 	root.AddCommand(newWellKnownCmd())
+	root.AddCommand(newMCPCmd())
 	root.AddCommand(newIntrospectCmd())
 	root.AddCommand(newReplayCmd())
 	root.AddCommand(newDetectCmd())

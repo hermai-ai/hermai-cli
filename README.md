@@ -40,33 +40,6 @@ One skill covers both audiences. When a user asks for data from a site, the agen
 
 Repo: [hermai-ai/hermai-skills](https://github.com/hermai-ai/hermai-skills).
 
-## MCP server
-
-MCP-capable runtimes can use Hermai as native tools instead of shelling out to individual commands:
-
-```bash
-hermai registry login
-hermai mcp serve
-```
-
-Generic MCP client config:
-
-```json
-{
-  "mcpServers": {
-    "hermai": {
-      "command": "hermai",
-      "args": ["mcp", "serve"],
-      "env": {
-        "HERMAI_PLATFORM_KEY": "hm_sk_..."
-      }
-    }
-  }
-}
-```
-
-If you already ran `hermai registry login` on the same machine, the environment variable is optional. The server exposes schema lookup, public catalog listing, six-field schema request submission, local workflow classification, and schema request status checks over stdio.
-
 ## Call a site as an API
 
 ```bash

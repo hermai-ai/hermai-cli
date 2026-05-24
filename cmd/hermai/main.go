@@ -52,7 +52,6 @@ by observing browser network traffic and producing structured JSON schemas.`,
 	root.AddCommand(newProbeCmd())
 	root.AddCommand(newExtractCmd())
 	root.AddCommand(newWellKnownCmd())
-	root.AddCommand(newMCPCmd())
 	root.AddCommand(newIntrospectCmd())
 	root.AddCommand(newReplayCmd())
 	root.AddCommand(newDetectCmd())

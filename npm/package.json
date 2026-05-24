@@ -1,6 +1,5 @@
 {
   "name": "hermai-cli",
-  "mcpName": "io.github.hermai-ai/hermai-cli",
   "version": "0.0.0",
   "description": "Turn any website into a structured JSON API for AI agents.",
   "keywords": [

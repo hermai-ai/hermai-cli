@@ -18,36 +18,12 @@ toolchain required.
 
 ## Environment
 
-- `HERMAI_PLATFORM_KEY` authenticates registry and MCP requests. You can also
+- `HERMAI_PLATFORM_KEY` authenticates registry requests. You can also
   run `hermai registry login` once to store the key in local Hermai config.
 - `HERMAI_SKIP_POSTINSTALL=1` skips the binary download at install time.
   Useful in sandboxed CI where outbound network to GitHub releases is
   blocked; you'll need to drop the binary at `node_modules/hermai-cli/bin/hermai`
   yourself.
-
-## MCP server
-
-Expose Hermai as tools in any MCP-capable runtime:
-
-```bash
-hermai mcp serve
-```
-
-Generic MCP client config:
-
-```json
-{
-  "mcpServers": {
-    "hermai": {
-      "command": "hermai",
-      "args": ["mcp", "serve"],
-      "env": {
-        "HERMAI_PLATFORM_KEY": "hm_sk_..."
-      }
-    }
-  }
-}
-```
 
 ## Other install channels
 

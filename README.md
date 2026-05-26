@@ -77,6 +77,8 @@ hermai detect <url>                          # platform + anti-bot classificatio
 hermai wellknown <domain>                    # robots, sitemap, RSS, GraphQL
 hermai probe --body <url> | hermai extract   # 13 named embedded-data patterns plus
                                              # any <script type="application/json" id="X">
+hermai probe --body <pdf-url> | hermai extract --state IL --url <pdf-url> --report-month 2026-02
+hermai enforcement --state IL <root-url>     # discover Illinois IDFPR PDFs and emit cited actions
 hermai intercept <url>                       # capture XHR in a browser
 hermai introspect <graphql-url>              # GraphQL schema
 hermai replay request.json                   # replay a captured request

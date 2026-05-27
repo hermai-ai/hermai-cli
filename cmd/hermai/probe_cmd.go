@@ -30,7 +30,7 @@ func newProbeCmd() *cobra.Command {
 strategies to find direct API access patterns. Returns response metadata,
 anti-bot detection results, and any discovered JSON endpoints.
 
-Use --body to output raw HTML (pipe to 'hermai extract' for pattern analysis).
+Use --body to output the raw response body (pipe HTML or PDF responses to 'hermai extract').
 Use --stealth to force Chrome TLS fingerprinting on the first attempt.
 
 No API key required — all operations are deterministic.
@@ -78,7 +78,7 @@ Examples:
 	cmd.Flags().StringVar(&proxyURL, "proxy", "", "Proxy URL (http:// or socks5://)")
 	cmd.Flags().StringVar(&timeout, "timeout", "10s", "Request timeout (e.g. 5s, 30s)")
 	cmd.Flags().BoolVarP(&insecure, "insecure", "k", false, "Skip TLS certificate verification")
-	cmd.Flags().BoolVar(&body, "body", false, "Output raw HTML body to stdout (for piping to extract)")
+	cmd.Flags().BoolVar(&body, "body", false, "Output raw response body to stdout (for piping to extract)")
 	cmd.Flags().StringVar(&save, "save", "", "Save HTML body to file (alongside JSON output)")
 	cmd.Flags().StringVar(&format, "format", "json", "Output format: json (indented) or compact")
 
@@ -104,7 +104,7 @@ func probeBodyMode(ctx context.Context, targetURL string, opts probe.Options) er
 		fmt.Fprintf(os.Stderr, "warning: HTTP %d\n", resp.StatusCode)
 	}
 
-	_, err = io.Copy(os.Stdout, io.LimitReader(resp.Body, maxHTMLInputSize))
+	_, err = io.Copy(os.Stdout, io.LimitReader(resp.Body, maxExtractInputSize))
 	return err
 }
 

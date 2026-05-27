@@ -1,0 +1,12 @@
+FROM golang:1.25-bookworm
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends poppler-utils ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+CMD ["go", "test", "./..."]

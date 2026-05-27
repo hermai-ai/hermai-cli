@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"time"
 
+	"github.com/hermai-ai/hermai-cli/pkg/enforcement"
 	"github.com/hermai-ai/hermai-cli/pkg/htmlext"
+	"github.com/hermai-ai/hermai-cli/pkg/pdftext"
 	"github.com/spf13/cobra"
 )
 
@@ -15,15 +19,21 @@ func newExtractCmd() *cobra.Command {
 		pattern      string
 		listPatterns bool
 		baseURL      string
+		state        string
+		reportMonth  string
 		format       string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "extract [file]",
-		Short: "Extract embedded data patterns from HTML",
+		Short: "Extract embedded data patterns from HTML or page-aware text from PDFs",
 		Long: `Extract scans HTML for known embedded data patterns — SSR state,
 JSON-LD, __NEXT_DATA__, YouTube's ytInitialData, TikTok's hydration data,
 and 10+ other patterns that websites embed as structured data in their pages.
+
+For PDFs, extract emits page-aware text by default. State-specific enforcement
+profiles such as --state IL convert supported disciplinary reports into cited
+action records with deterministic verification signals.
 
 Reads from a file path or stdin. Outputs JSON with all found patterns.
 
@@ -32,6 +42,7 @@ No API key or network access required — purely deterministic HTML parsing.
 Examples:
   hermai extract page.html
   curl -s https://example.com | hermai extract
+  hermai probe --body https://example.gov/report.pdf | hermai extract --state IL --url https://example.gov/report.pdf --report-month 2026-02
   hermai extract --pattern ytInitialData page.html
   hermai extract --list-patterns`,
 		Args: cobra.MaximumNArgs(1),
@@ -40,11 +51,32 @@ Examples:
 				return writeJSON(os.Stdout, htmlext.ListPatterns(), format)
 			}
 
-			rawHTML, err := readHTMLInput(args)
+			rawInput, err := readInput(args)
 			if err != nil {
 				return err
 			}
 
+			if pdftext.IsPDF(rawInput) {
+				if pattern != "" {
+					return fmt.Errorf("--pattern is only supported for HTML input")
+				}
+				ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+				defer cancel()
+				doc, err := pdftext.Extract(ctx, rawInput)
+				if err != nil {
+					return err
+				}
+				if state == "IL" {
+					output := enforcement.ExtractIllinois(doc, enforcement.Options{
+						SourceURL:   baseURL,
+						ReportMonth: reportMonth,
+					})
+					return writeJSON(os.Stdout, output, format)
+				}
+				return writeJSON(os.Stdout, doc, format)
+			}
+
+			rawHTML := string(rawInput)
 			if pattern != "" {
 				data := htmlext.ExtractSinglePattern(rawHTML, pattern)
 				if data == nil {
@@ -63,38 +95,60 @@ Examples:
 	cmd.Flags().StringVar(&pattern, "pattern", "", "Extract only a specific pattern (e.g. ytInitialData)")
 	cmd.Flags().BoolVar(&listPatterns, "list-patterns", false, "List all known embedded data patterns")
 	cmd.Flags().StringVar(&baseURL, "url", "", "Base URL for resolving relative links")
+	cmd.Flags().StringVar(&state, "state", "", "State-specific PDF enforcement extractor (e.g. IL)")
+	cmd.Flags().StringVar(&reportMonth, "report-month", "", "Report month for PDF enforcement output (YYYY-MM)")
 	cmd.Flags().StringVar(&format, "format", "json", "Output format: json (indented) or compact")
 
 	return cmd
 }
 
-// maxHTMLInputSize caps file/stdin reads to avoid unbounded memory use.
-const maxHTMLInputSize = 50 * 1024 * 1024 // 50 MB
+// maxExtractInputSize caps file/stdin reads to avoid unbounded memory use.
+const maxExtractInputSize = 50 * 1024 * 1024 // 50 MB
+const maxHTMLInputSize = maxExtractInputSize
 
 func readHTMLInput(args []string) (string, error) {
+	data, err := readInput(args)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func readInput(args []string) ([]byte, error) {
 	if len(args) > 0 {
 		f, err := os.Open(args[0])
 		if err != nil {
-			return "", fmt.Errorf("failed to open %s: %w", args[0], err)
+			return nil, fmt.Errorf("failed to open %s: %w", args[0], err)
 		}
 		defer f.Close()
-		data, err := io.ReadAll(io.LimitReader(f, maxHTMLInputSize))
+		data, err := readBounded(f, args[0])
 		if err != nil {
-			return "", fmt.Errorf("failed to read %s: %w", args[0], err)
+			return nil, fmt.Errorf("failed to read %s: %w", args[0], err)
 		}
-		return string(data), nil
+		return data, nil
 	}
 
 	stat, _ := os.Stdin.Stat()
 	if (stat.Mode() & os.ModeCharDevice) != 0 {
-		return "", fmt.Errorf("no input: provide a file path or pipe HTML via stdin")
+		return nil, fmt.Errorf("no input: provide a file path or pipe HTML/PDF via stdin")
 	}
 
-	data, err := io.ReadAll(io.LimitReader(os.Stdin, maxHTMLInputSize))
+	data, err := readBounded(os.Stdin, "stdin")
 	if err != nil {
-		return "", fmt.Errorf("failed to read stdin: %w", err)
+		return nil, fmt.Errorf("failed to read stdin: %w", err)
 	}
-	return string(data), nil
+	return data, nil
+}
+
+func readBounded(r io.Reader, label string) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxExtractInputSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxExtractInputSize {
+		return nil, fmt.Errorf("%s exceeds %d byte extract input limit; refusing truncated parse", label, maxExtractInputSize)
+	}
+	return data, nil
 }
 
 func buildExtractOutput(page htmlext.PageContent) map[string]any {

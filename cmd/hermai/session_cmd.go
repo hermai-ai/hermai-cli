@@ -16,23 +16,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// sessionSchemaResponse matches the shape of GET /v1/schemas/{site} .data
+// sessionSchemaResponse matches .data from
+// GET /v1/schemas/{site}/session-bootstrap.
 type sessionSchemaResponse struct {
-	Site       string `json:"site"`
-	PublicCard struct {
-		Session                    sessionCardBlock `json:"session"`
-		RequiresSessionBootstrap   bool             `json:"requires_session_bootstrap"`
-	} `json:"public_card"`
+	Site                     string           `json:"site"`
+	Session                  sessionCardBlock `json:"session"`
+	RequiresSessionBootstrap bool             `json:"requires_session_bootstrap"`
 }
 
 type sessionCardBlock struct {
-	BootstrapURL            string   `json:"bootstrap_url,omitempty"`
-	TLSProfile              string   `json:"tls_profile,omitempty"`
-	RequiredCookies         []string `json:"required_cookies,omitempty"`
-	EndpointsNeedingSession []string `json:"endpoints_needing_session,omitempty"`
-	SignFunction            string   `json:"sign_function,omitempty"`
-	SignStrategy            string   `json:"sign_strategy,omitempty"`
-	Description             string   `json:"description,omitempty"`
+	BootstrapURL    string   `json:"bootstrap_url,omitempty"`
+	RequiredCookies []string `json:"required_cookies,omitempty"`
 }
 
 func newSessionCmd() *cobra.Command {
@@ -196,7 +190,7 @@ Examples:
 			if err != nil {
 				return fmt.Errorf("fetching schema for %s: %w", site, err)
 			}
-			session := card.PublicCard.Session
+			session := card.Session
 			if session.BootstrapURL == "" {
 				return fmt.Errorf("schema for %s does not declare a bootstrap_url — nothing to warm", site)
 			}
@@ -207,10 +201,6 @@ Examples:
 				fmt.Fprintf(os.Stderr, "  waiting for cookies: %s\n",
 					strings.Join(session.RequiredCookies, ", "))
 			}
-			if session.Description != "" {
-				fmt.Fprintf(os.Stderr, "  docs: %s\n", truncate(session.Description, 140))
-			}
-
 			ctx, cancel := signalContext(timeout)
 			defer cancel()
 
@@ -251,10 +241,6 @@ Examples:
 			fmt.Fprintf(os.Stderr, "session ready (%d cookies, %v)\n", result.CookieCount, result.Duration.Round(time.Millisecond))
 			fmt.Fprintf(os.Stderr, "  saved: %s\n", result.StoragePath)
 			fmt.Fprintf(os.Stderr, "  required cookies found: %v\n", result.RequiredFound)
-			if session.SignFunction != "" {
-				fmt.Fprintf(os.Stderr, "  note: this site also uses per-request signing via %s\n", session.SignFunction)
-				fmt.Fprintf(os.Stderr, "        replay strategy: %s\n", session.SignStrategy)
-			}
 			return nil
 		},
 	}
@@ -356,8 +342,10 @@ func newSessionListCmd() *cobra.Command {
 
 func fetchSessionCard(cfg config.Config, site string) (*sessionSchemaResponse, error) {
 	client := newPlatformClient(cfg.Platform)
-	path := "/v1/schemas/" + url.PathEscape(site)
-	raw, err := client.do("GET", path, nil, false, nil)
+	path := "/v1/schemas/" + url.PathEscape(site) + "/session-bootstrap"
+	raw, err := client.do("GET", path, nil, true, map[string]string{
+		"X-Hermai-Intent": "Bootstrap a local browser session for this registered site so Hermai CLI can capture required cookies for user-authorized requests",
+	})
 	if err != nil {
 		return nil, err
 	}

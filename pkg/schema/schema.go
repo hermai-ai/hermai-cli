@@ -110,9 +110,18 @@ type Endpoint struct {
 // ResponseSchema describes the structure of an endpoint's JSON response.
 // Inferred automatically during validation by sampling the response body.
 type ResponseSchema struct {
-	Type   string        `json:"type"`             // "object", "array", "string", "number", "boolean"
-	Fields []FieldSchema `json:"fields,omitempty"` // for object type
-	Items  *FieldSchema  `json:"items,omitempty"`  // for array type: schema of each element
+	Type    string               `json:"type"`              // "object", "array", "string", "number", "boolean"
+	Extract *ExtractionDirective `json:"extract,omitempty"` // optional hosted extraction source
+	Fields  []FieldSchema        `json:"fields,omitempty"`  // for object type
+	Items   *FieldSchema         `json:"items,omitempty"`   // for array type: schema of each element
+}
+
+// ExtractionDirective selects a structured source embedded in an HTML
+// response before ResponseSchema fields are projected. The hosted service
+// validates supported directive values when a schema is registered.
+type ExtractionDirective struct {
+	Type       string `json:"type"`
+	SchemaType string `json:"schema_type"`
 }
 
 // FieldSchema describes a single field within a response object.

@@ -160,6 +160,14 @@ func TestSchema_JSONRoundTrip(t *testing.T) {
 				ResponseMapping: map[string]string{
 					"title": "data.product.title",
 				},
+				ResponseSchema: &ResponseSchema{
+					Type: "object",
+					Extract: &ExtractionDirective{
+						Type:       "jsonld",
+						SchemaType: "Product",
+					},
+					Fields: []FieldSchema{{Name: "name", Type: "string"}},
+				},
 			},
 		},
 	}
@@ -182,6 +190,9 @@ func TestSchema_JSONRoundTrip(t *testing.T) {
 
 	if string(data) != string(restoredData) {
 		t.Errorf("JSON round-trip mismatch:\noriginal:  %s\nrestored: %s", string(data), string(restoredData))
+	}
+	if got := restored.Endpoints[0].ResponseSchema.Extract; got == nil || got.Type != "jsonld" || got.SchemaType != "Product" {
+		t.Fatalf("response_schema.extract = %#v", got)
 	}
 }
 

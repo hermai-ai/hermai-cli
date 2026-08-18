@@ -41,6 +41,7 @@ by observing browser network traffic and producing structured JSON schemas.`,
 	}
 
 	root.AddCommand(newInitCmd())
+	root.AddCommand(newLoginCmd())
 	root.AddCommand(newFetchCmd())
 	root.AddCommand(newCacheCmd())
 	root.AddCommand(newSchemaCmd())

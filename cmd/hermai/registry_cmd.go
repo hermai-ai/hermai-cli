@@ -47,6 +47,19 @@ type platformErrInfo struct {
 	Message string `json:"message"`
 }
 
+// platformAPIError is a typed error returned by platformClient.do whenever
+// the API responds with a coded error in the envelope. Callers that need to
+// branch on the code (device flow polling, for example) can pull it out
+// with errors.As instead of parsing the formatted message.
+type platformAPIError struct {
+	Code    string
+	Message string
+}
+
+func (e *platformAPIError) Error() string {
+	return fmt.Sprintf("%s: %s", e.Code, e.Message)
+}
+
 func (c *platformClient) do(method, path string, body io.Reader, auth bool, extraHeaders map[string]string) (json.RawMessage, error) {
 	if c.baseURL == "" {
 		return nil, errors.New("platform URL not configured (set platform_url in config or HERMAI_PLATFORM_URL)")
@@ -85,7 +98,7 @@ func (c *platformClient) do(method, path string, body io.Reader, auth bool, extr
 	}
 	if resp.StatusCode >= 400 || !env.Success {
 		if env.Error != nil {
-			return nil, fmt.Errorf("%s: %s", env.Error.Code, env.Error.Message)
+			return nil, &platformAPIError{Code: env.Error.Code, Message: env.Error.Message}
 		}
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(raw))
 	}
